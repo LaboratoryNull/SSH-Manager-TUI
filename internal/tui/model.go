@@ -80,6 +80,8 @@ type tabState struct {
 	profile        config.Session
 	conn           *remote.Connection
 	term           *terminalScreen
+	selection      *terminalSelection
+	clipboardPaste bool
 
 	filesFocused  bool
 	sftpHidden    bool
@@ -129,9 +131,11 @@ type Model struct {
 	testing    bool
 	connecting bool
 
-	profile config.Session
-	conn    *remote.Connection
-	term    *terminalScreen
+	profile        config.Session
+	conn           *remote.Connection
+	term           *terminalScreen
+	selection      *terminalSelection
+	clipboardPaste bool
 
 	filesFocused  bool
 	sftpHidden    bool
@@ -358,17 +362,32 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleForwardError(msg)
 	case historyLoadedMsg:
 		return m.handleHistoryLoaded(msg)
+	case tea.ClipboardMsg:
+		m.clipboardPaste = false
+		if m.page == pageConnected && !m.filesFocused {
+			if msg.Content == "" {
+				m.status = "Буфер обмена пуст или недоступен терминалу"
+				return m, nil
+			}
+			return m.handleConnectedPaste(msg.Content)
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		if model, cmd, handled := m.handleTabKey(msg); handled {
 			return model, cmd
 		}
 		return m.handleKey(msg)
 	case tea.PasteMsg:
+		m.clipboardPaste = false
 		if m.page == pageConnected {
 			return m.handleConnectedPaste(msg.Content)
 		}
 	case tea.MouseClickMsg:
 		return m.handleMouseClick(msg)
+	case tea.MouseMotionMsg:
+		return m.handleMouseMotion(msg)
+	case tea.MouseReleaseMsg:
+		return m.handleMouseRelease(msg)
 	}
 
 	if m.groupInput != nil {
@@ -632,12 +651,30 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if matchesPlatformShortcut(key, 'c', true) && !m.filesFocused {
-		if m.term == nil || strings.TrimSpace(m.term.String()) == "" {
+		text := ""
+		selected := m.selection != nil && m.selection.hasRange()
+		if selected {
+			text = m.selection.text
+			if text == "" && m.term != nil {
+				text = m.term.SelectionText(m.selection)
+			}
+		} else if m.term != nil {
+			text = strings.TrimRight(m.term.String(), "\n")
+		}
+		if strings.TrimSpace(text) == "" {
 			m.status = "В терминале пока нет текста для копирования"
 			return m, nil
 		}
-		m.status = "Текст видимой области терминала скопирован"
-		return m, tea.SetClipboard(strings.TrimRight(m.term.String(), "\n"))
+		if selected {
+			m.status = "Выделенный текст скопирован"
+		} else {
+			m.status = "Текст видимой области терминала скопирован"
+		}
+		return m, tea.SetClipboard(text)
+	}
+	if matchesPlatformShortcut(key, 'v', true) && !m.filesFocused {
+		m.clipboardPaste = true
+		return m, func() tea.Msg { return tea.ReadClipboard() }
 	}
 	if m.escapePending {
 		m.escapePending = false
@@ -707,6 +744,7 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if err := m.conn.Send(data); err != nil {
 		m.status = "Ошибка записи в SSH: " + err.Error()
 	}
+	m.selection = nil
 	return m, nil
 }
 
@@ -715,6 +753,7 @@ func (m *Model) handleConnectedPaste(content string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if localPaths, ok := droppedLocalPaths(content); ok {
+		m.selection = nil
 		remoteDirectory := m.conn.Home
 		if m.term != nil && m.term.CurrentDirectory() != "" {
 			remoteDirectory = m.term.CurrentDirectory()
@@ -732,6 +771,7 @@ func (m *Model) handleConnectedPaste(content string) (tea.Model, tea.Cmd) {
 	if err := m.conn.Send(data); err != nil {
 		m.status = "Ошибка вставки в SSH: " + err.Error()
 	}
+	m.selection = nil
 	return m, nil
 }
 
@@ -910,15 +950,15 @@ func (m *Model) connectedHints(width int) string {
 	return hintsView(width,
 		[][2]string{
 			{keys.newTab, "новая вкладка"}, {keys.closeTab, "закрыть"}, {keys.tabs, "вкладки"},
-			{keys.numberedTabs, "по номеру"}, {keys.toggleSFTP, "SFTP"}, {keys.copy, "копировать"}, {keys.ports, "порты"}, {"Esc q", "отключить"},
+			{keys.numberedTabs, "по номеру"}, {keys.toggleSFTP, "SFTP"}, {keys.copy, "копировать"}, {keys.paste, "вставить"}, {keys.ports, "порты"}, {"Esc q", "отключить"},
 		},
 		[][2]string{
-			{compact.newTab, "+вкладка"}, {compact.closeTab, "закрыть"}, {compact.tabs, "вкладки"},
-			{compact.toggleSFTP, "SFTP"}, {compact.ports, "порты"}, {"Esc q", "выход"},
+			{compact.copy, "копия"}, {compact.paste, "вставка"}, {compact.toggleSFTP, "SFTP"},
+			{compact.ports, "порты"}, {"Esc q", "выход"},
 		},
-		[][2]string{{compact.newTab, "+"}, {compact.closeTab, "×"}, {compact.toggleSFTP, "SFTP"}, {compact.ports, "порты"}, {"Esc q", "выход"}},
-		[][2]string{{compact.newTab, "+"}, {compact.closeTab, "×"}, {compact.toggleSFTP, "SFTP"}, {compact.ports, "порты"}},
-		[][2]string{{compact.toggleSFTP, "SFTP"}, {compact.ports, "порты"}},
+		[][2]string{{compact.copy, "копия"}, {compact.paste, "вставка"}, {compact.toggleSFTP, "SFTP"}, {"Esc q", "выход"}},
+		[][2]string{{compact.copy, "копия"}, {compact.paste, "вставка"}, {compact.toggleSFTP, "SFTP"}},
+		[][2]string{{compact.copy, "копия"}, {compact.paste, "вставка"}},
 	)
 }
 
@@ -1063,7 +1103,7 @@ func (m *Model) connectedView() string {
 	consoleLines := []string{lipgloss.NewStyle().Bold(true).Foreground(successColor).Render(consoleTitle)}
 	termText := ""
 	if m.term != nil {
-		termText = m.term.RenderANSI()
+		termText = m.term.RenderANSISelection(m.selection)
 	}
 	consoleLines = append(consoleLines, termText, m.connectedHints(termW))
 	consoleContent := lipgloss.NewStyle().Width(termW).Height(innerH).MaxHeight(innerH).Render(strings.Join(consoleLines, "\n"))
@@ -1559,6 +1599,7 @@ func (m *Model) resizeRemote() {
 	if m.conn != nil {
 		_ = m.conn.Resize(w, h)
 	}
+	m.selection = nil
 }
 
 func (m *Model) refreshFiles() {
@@ -1755,6 +1796,7 @@ func (m *Model) captureTab() *tabState {
 		profileManager: m.profileManager, importWizard: m.importWizard,
 		inputs: m.inputs, formFocus: m.formFocus, testing: m.testing, connecting: m.connecting,
 		profile: m.profile, conn: m.conn, term: m.term,
+		selection: m.selection, clipboardPaste: m.clipboardPaste,
 		filesFocused: m.filesFocused, sftpHidden: m.sftpHidden, root: m.root, visible: m.visible,
 		fileCursor: m.fileCursor, fileOffset: m.fileOffset, picker: m.picker,
 		escapePending: m.escapePending, escapeID: m.escapeID,
@@ -1780,6 +1822,7 @@ func (m *Model) restoreTab(index int) {
 	m.profileManager, m.importWizard = state.profileManager, state.importWizard
 	m.inputs, m.formFocus, m.testing, m.connecting = state.inputs, state.formFocus, state.testing, state.connecting
 	m.profile, m.conn, m.term = state.profile, state.conn, state.term
+	m.selection, m.clipboardPaste = state.selection, state.clipboardPaste
 	m.filesFocused, m.sftpHidden = state.filesFocused, state.sftpHidden
 	m.root, m.visible, m.fileCursor, m.fileOffset = state.root, state.visible, state.fileCursor, state.fileOffset
 	m.picker, m.escapePending, m.escapeID = state.picker, state.escapePending, state.escapeID
@@ -1801,6 +1844,7 @@ func (m *Model) resetTab(id uint64) {
 	}
 	m.testing, m.connecting = false, false
 	m.profile, m.conn, m.term = config.Session{}, nil, nil
+	m.selection, m.clipboardPaste = nil, false
 	m.filesFocused, m.sftpHidden = false, true
 	m.root, m.visible, m.fileCursor, m.fileOffset = nil, nil, 0, 0
 	m.picker, m.escapePending, m.escapeID = nil, false, 0
@@ -1927,6 +1971,16 @@ func (m *Model) messageTabIndex(message tea.Msg) (int, bool) {
 		return m.tabIndexByID(msg.tabID), true
 	case historyLoadedMsg:
 		return m.tabIndexByID(msg.tabID), true
+	case tea.ClipboardMsg:
+		if m.clipboardPaste {
+			return m.activeTab, true
+		}
+		for index, state := range m.tabs {
+			if index != m.activeTab && state.clipboardPaste {
+				return index, true
+			}
+		}
+		return -1, true
 	default:
 		return -1, false
 	}
@@ -1950,6 +2004,7 @@ func (m *Model) disconnect(status string) {
 		m.conn.Close()
 	}
 	m.conn, m.root, m.visible, m.term = nil, nil, nil, nil
+	m.selection, m.clipboardPaste = nil, false
 	m.transferring, m.transferCh, m.transferCancel = false, nil, nil
 	m.picker, m.transferRemoteTarget, m.escapePending = nil, nil, false
 	m.forwardModal, m.forwards = nil, nil

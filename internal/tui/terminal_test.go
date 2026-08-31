@@ -139,3 +139,19 @@ func TestTerminalApplicationCursorModeEncodesArrowKeysForFullScreenApps(t *testi
 		t.Fatal("DECCKM application cursor mode was not disabled")
 	}
 }
+
+func TestTerminalSelectionExtractsAndHighlightsText(t *testing.T) {
+	s := newTerminalScreen(8, 2)
+	s.Feed([]byte("hello\r\nworld"))
+	selection := &terminalSelection{anchor: terminalPoint{x: 1, y: 0}, head: terminalPoint{x: 2, y: 1}}
+	if got := s.SelectionText(selection); got != "ello\nwor" {
+		t.Fatalf("selected text = %q", got)
+	}
+	reversed := &terminalSelection{anchor: selection.head, head: selection.anchor}
+	if got := s.SelectionText(reversed); got != "ello\nwor" {
+		t.Fatalf("reverse selected text = %q", got)
+	}
+	if rendered := s.RenderANSISelection(selection); !strings.Contains(rendered, "48;2;125;86;244") {
+		t.Fatalf("selection highlight is missing: %q", rendered)
+	}
+}

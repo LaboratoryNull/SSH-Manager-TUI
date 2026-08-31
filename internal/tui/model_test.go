@@ -242,6 +242,32 @@ func TestMouseClickSwitchesConnectedPane(t *testing.T) {
 	}
 }
 
+func TestMouseDragSelectsTerminalText(t *testing.T) {
+	m := &Model{width: 100, height: 30, page: pageConnected, sftpHidden: true, term: newTerminalScreen(98, 25)}
+	m.term.Feed([]byte("hello\r\nworld"))
+	_, _ = m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: 2, Y: 3, Button: tea.MouseLeft}))
+	_, _ = m.handleMouseMotion(tea.MouseMotionMsg(tea.Mouse{X: 3, Y: 4, Button: tea.MouseLeft}))
+	_, _ = m.handleMouseRelease(tea.MouseReleaseMsg(tea.Mouse{X: 3, Y: 4, Button: tea.MouseLeft}))
+	if m.selection == nil || m.selection.dragging {
+		t.Fatalf("selection state = %#v", m.selection)
+	}
+	if got := m.selection.text; got != "ello\nwor" {
+		t.Fatalf("selected text = %q", got)
+	}
+	_, copyCmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl | tea.ModShift}))
+	if copyCmd == nil || m.status != "Выделенный текст скопирован" {
+		t.Fatalf("copy state: cmd=%v status=%q", copyCmd != nil, m.status)
+	}
+}
+
+func TestPasteShortcutRequestsSystemClipboard(t *testing.T) {
+	m := &Model{page: pageConnected, sftpHidden: true, term: newTerminalScreen(20, 4)}
+	_, cmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'v', Mod: tea.ModCtrl | tea.ModShift}))
+	if cmd == nil || !m.clipboardPaste {
+		t.Fatalf("paste request: cmd=%v pending=%v", cmd != nil, m.clipboardPaste)
+	}
+}
+
 func TestSFTPHintIsClickable(t *testing.T) {
 	root := &fileNode{Name: "/root", Path: "/root", Dir: true, Expanded: true, Loaded: true}
 	m := &Model{

@@ -10,14 +10,14 @@ import (
 )
 
 var clickableHintLabels = []string{
-	"⌘Space", "⌘T", "⌘W", "⌘B", "⌘C", "⌘D", "⌘U", "⌘X", "⌘Q",
+	"⌘Space", "⌘T", "⌘W", "⌘B", "⌘C", "⌘V", "⌘D", "⌘U", "⌘X", "⌘Q",
 	"⌥1…9", "⌥←/→", "⌥P",
-	"Ctrl+Shift+C", "Ctrl+Space", "Завершено", "Alt+1…9", "Alt+←/→", "←/Backspace",
+	"Ctrl+Shift+C", "Ctrl+Shift+V", "Ctrl+Space", "Завершено", "Alt+1…9", "Alt+←/→", "←/Backspace",
 	"Tab/↑/↓", "n/н/Esc", "Ctrl+T", "Ctrl+W", "Ctrl+B", "Ctrl+D",
 	"Ctrl+U", "Ctrl+X", "Alt←/→", "Esc q", "n/e/d", "Alt+P", "AltP",
 	"p/←/→",
 	"^Space", "Enter", "Space", "Backspace", "↑/↓", "←/→", "y/д",
-	"shift+tab", "Tab", "Esc", "F5", "^T", "^W", "^B", "^D", "^U",
+	"shift+tab", "Tab", "Esc", "F5", "^T", "^W", "^B", "^D", "^U", "^⇧C", "^⇧V",
 	"^X", "n", "e", "d", "g", "q", "s", "u", "p", "i", "a", "f", "/",
 }
 
@@ -34,10 +34,16 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.page == pageConnected && m.forwardModal == nil && m.picker == nil && m.hostKeyPrompt == nil {
+		if point, ok := m.terminalPointAt(mouse, false); ok {
+			m.filesFocused = false
+			m.selection = &terminalSelection{anchor: point, head: point, dragging: true}
+			return m, nil
+		}
 		fileW, _, _, _, _ := m.layout()
 		if mouse.Y > 0 {
 			if !m.sftpHidden && mouse.X < fileW {
 				m.filesFocused = true
+				m.selection = nil
 			} else {
 				m.filesFocused = false
 			}
@@ -47,6 +53,55 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		return m.activateHint(label)
 	}
 	return m, nil
+}
+
+func (m *Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
+	if m.selection == nil || !m.selection.dragging || m.term == nil {
+		return m, nil
+	}
+	point, _ := m.terminalPointAt(msg.Mouse(), true)
+	m.selection.head = point
+	m.selection.moved = true
+	m.selection.text = m.term.SelectionText(m.selection)
+	return m, nil
+}
+
+func (m *Model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
+	if m.selection == nil || !m.selection.dragging || m.term == nil {
+		return m, nil
+	}
+	point, _ := m.terminalPointAt(msg.Mouse(), true)
+	if point != m.selection.anchor {
+		m.selection.moved = true
+	}
+	m.selection.head = point
+	m.selection.dragging = false
+	if !m.selection.hasRange() {
+		m.selection = nil
+		return m, nil
+	}
+	m.selection.text = m.term.SelectionText(m.selection)
+	m.status = "Текст выделен — используйте сочетание копирования"
+	return m, nil
+}
+
+func (m *Model) terminalPointAt(mouse tea.Mouse, clampOutside bool) (terminalPoint, bool) {
+	if m.page != pageConnected || m.term == nil {
+		return terminalPoint{}, false
+	}
+	fileW, _, _, termWidth, termHeight := m.layout()
+	originX := 1
+	if !m.sftpHidden {
+		originX = fileW + 1
+	}
+	originY := 3 // tab bar, outer border, then SSH title
+	x, y := mouse.X-originX, mouse.Y-originY
+	inside := x >= 0 && x < termWidth && y >= 0 && y < termHeight
+	if !inside && !clampOutside {
+		return terminalPoint{}, false
+	}
+	point := terminalPoint{x: clamp(x, 0, termWidth-1), y: clamp(y, 0, termHeight-1)}
+	return m.term.selectionPoint(point), inside
 }
 
 func (m *Model) clickedTab(x int) int {
@@ -142,12 +197,18 @@ func (m *Model) activateHint(label string) (tea.Model, tea.Cmd) {
 		press = key('x', commandMod, "")
 	case isPlatformHint(label, keys.focus, compact.focus):
 		press = key(tea.KeySpace, commandMod, "")
-	case isPlatformHint(label, keys.copy):
+	case isPlatformHint(label, keys.copy, compact.copy):
 		mod := commandMod
 		if keys.copy == "Ctrl+Shift+C" {
 			mod |= tea.ModShift
 		}
 		press = key('c', mod, "")
+	case isPlatformHint(label, keys.paste, compact.paste):
+		mod := commandMod
+		if keys.paste == "Ctrl+Shift+V" {
+			mod |= tea.ModShift
+		}
+		press = key('v', mod, "")
 	case isPlatformHint(label, keys.ports, compact.ports):
 		press = key('p', tea.ModAlt, "")
 	case isPlatformHint(label, keys.tabs, compact.tabs, keys.numberedTabs):

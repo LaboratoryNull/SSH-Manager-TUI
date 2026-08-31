@@ -36,6 +36,51 @@ type terminalSnapshot struct {
 	scrollTop, scrollBottom int
 }
 
+type terminalPoint struct {
+	x, y int
+}
+
+type terminalSelection struct {
+	anchor, head terminalPoint
+	dragging     bool
+	moved        bool
+	text         string
+}
+
+func (s *terminalSelection) bounds() (terminalPoint, terminalPoint) {
+	if s == nil {
+		return terminalPoint{}, terminalPoint{}
+	}
+	if s.anchor.y < s.head.y || (s.anchor.y == s.head.y && s.anchor.x <= s.head.x) {
+		return s.anchor, s.head
+	}
+	return s.head, s.anchor
+}
+
+func (s *terminalSelection) hasRange() bool {
+	return s != nil && (s.moved || s.anchor != s.head)
+}
+
+func (s *terminalSelection) contains(x, y int) bool {
+	if !s.hasRange() {
+		return false
+	}
+	start, end := s.bounds()
+	if y < start.y || y > end.y {
+		return false
+	}
+	if start.y == end.y {
+		return x >= start.x && x <= end.x
+	}
+	if y == start.y {
+		return x >= start.x
+	}
+	if y == end.y {
+		return x <= end.x
+	}
+	return true
+}
+
 // terminalScreen is an in-memory VT/xterm screen. Bubble Tea owns the real
 // terminal, so SSH output is interpreted here and rendered as styled cells.
 type terminalScreen struct {
@@ -287,6 +332,41 @@ func (t *terminalScreen) PasteBytes(content string) []byte {
 // sequences (ESC O A/B/C/D) until they disable it again.
 func (t *terminalScreen) KeyBytes(key tea.KeyPressMsg) []byte {
 	return keyBytesForMode(key, t.applicationCursor)
+}
+
+func (t *terminalScreen) selectionPoint(point terminalPoint) terminalPoint {
+	point.x, point.y = clamp(point.x, 0, t.w-1), clamp(point.y, 0, t.h-1)
+	if t.rows[point.y][point.x].continuation && point.x > 0 {
+		point.x--
+	}
+	return point
+}
+
+func (t *terminalScreen) SelectionText(selection *terminalSelection) string {
+	if selection == nil || !selection.hasRange() {
+		return ""
+	}
+	start, end := selection.bounds()
+	start, end = t.selectionPoint(start), t.selectionPoint(end)
+	var lines []string
+	for y := start.y; y <= end.y; y++ {
+		from, to := 0, t.w-1
+		if y == start.y {
+			from = start.x
+		}
+		if y == end.y {
+			to = end.x
+		}
+		var line strings.Builder
+		for x := from; x <= to; x++ {
+			cell := t.rows[y][x]
+			if !cell.continuation {
+				line.WriteRune(cell.rune)
+			}
+		}
+		lines = append(lines, strings.TrimRight(line.String(), " "))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (t *terminalScreen) put(r rune) {
@@ -668,6 +748,10 @@ func (t *terminalScreen) String() string {
 }
 
 func (t *terminalScreen) RenderANSI() string {
+	return t.RenderANSISelection(nil)
+}
+
+func (t *terminalScreen) RenderANSISelection(selection *terminalSelection) string {
 	var out strings.Builder
 	active := terminalStyle{}
 	styled := false
@@ -677,7 +761,12 @@ func (t *terminalScreen) RenderANSI() string {
 				continue
 			}
 			style := cell.style
-			if t.cursorVisible && y == t.cy && x == min(t.cx, t.w-1) {
+			selected := selection.contains(x, y)
+			if selected {
+				style.fg = terminalColor{mode: 2, a: 17, b: 17, c: 27}
+				style.bg = terminalColor{mode: 2, a: 125, b: 86, c: 244}
+				style.inverse = false
+			} else if t.cursorVisible && y == t.cy && x == min(t.cx, t.w-1) {
 				style.inverse = !style.inverse
 			}
 			if !styled || style != active {

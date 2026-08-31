@@ -10,7 +10,7 @@ import (
 
 type platformKeys struct {
 	newTab, closeTab, toggleSFTP string
-	copy, cancel, focus          string
+	copy, paste, cancel, focus   string
 	download, upload, quit       string
 	tabs, numberedTabs, ports    string
 }
@@ -21,14 +21,14 @@ func platformKeysForOS(goos string) platformKeys {
 	if goos == "darwin" {
 		return platformKeys{
 			newTab: "⌘T", closeTab: "⌘W", toggleSFTP: "⌘B",
-			copy: "⌘C", cancel: "⌘X", focus: "⌘Space",
+			copy: "⌘C", paste: "⌘V", cancel: "⌘X", focus: "⌘Space",
 			download: "⌘D", upload: "⌘U", quit: "⌘Q",
 			tabs: "⌥←/→", numberedTabs: "⌥1…9", ports: "⌥P",
 		}
 	}
 	return platformKeys{
 		newTab: "Ctrl+T", closeTab: "Ctrl+W", toggleSFTP: "Ctrl+B",
-		copy: "Ctrl+Shift+C", cancel: "Ctrl+X", focus: "Ctrl+Space",
+		copy: "Ctrl+Shift+C", paste: "Ctrl+Shift+V", cancel: "Ctrl+X", focus: "Ctrl+Space",
 		download: "Ctrl+D", upload: "Ctrl+U", quit: "Ctrl+Q",
 		tabs: "Alt+←/→", numberedTabs: "Alt+1…9", ports: "Alt+P",
 	}
@@ -43,6 +43,7 @@ func compactPlatformKeysForOS(goos string) platformKeys {
 	if goos != "darwin" {
 		keys.newTab, keys.closeTab, keys.toggleSFTP = "^T", "^W", "^B"
 		keys.cancel, keys.focus, keys.download, keys.upload = "^X", "^Space", "^D", "^U"
+		keys.copy, keys.paste = "^⇧C", "^⇧V"
 		keys.tabs, keys.ports = "Alt←/→", "AltP"
 	}
 	return keys
