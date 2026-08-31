@@ -268,12 +268,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.page != pageConnected || !treeContains(m.root, msg.node) {
 			return m, nil
 		}
+		if msg.loadID != msg.node.loadID {
+			return m, nil
+		}
 		msg.node.Loading = false
 		if msg.err != nil {
 			m.status = "SFTP: " + msg.err.Error()
 			return m, nil
 		}
-		msg.node.Children, msg.node.Loaded = msg.children, true
+		msg.node.Children, msg.node.Loaded = mergeFileNodes(msg.node.Children, msg.children), true
 		m.refreshFiles()
 		return m, nil
 	case localDirLoadedMsg:
@@ -311,7 +314,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.transferCancel = nil
 			refreshTarget := m.transferRemoteTarget
 			m.transferRemoteTarget = nil
-			if msg.err != nil {
+			if errors.Is(msg.err, context.Canceled) {
+				m.transferErr = nil
+				m.transferPath = ""
+				m.status = "Передача файлов отменена"
+			} else if msg.err != nil {
 				operation := "скачивания"
 				if msg.uploading {
 					operation = "загрузки"
@@ -342,6 +349,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.page == pageConnected {
 			return m.handleConnectedPaste(msg.Content)
 		}
+	case tea.MouseClickMsg:
+		return m.handleMouseClick(msg)
 	}
 
 	if m.groupInput != nil {
@@ -560,6 +569,10 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.picker != nil {
 		return m.handlePickerKey(key)
 	}
+	if m.transferring && s == "ctrl+x" {
+		m.cancelTransfer()
+		return m, nil
+	}
 	if s == "ctrl+shift+c" && !m.filesFocused {
 		if m.term == nil || strings.TrimSpace(m.term.String()) == "" {
 			m.status = "В терминале пока нет текста для копирования"
@@ -614,16 +627,15 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "enter", "right", "l":
 			return m, m.expandSelected()
 		case "left", "h":
-			m.collapseSelected()
-		case "r":
-			if len(m.visible) > 0 {
-				n := m.visible[m.fileCursor]
-				if !n.Dir {
-					n = m.root
-				}
-				n.Loaded, n.Loading, n.Expanded = false, true, true
-				return m, loadDir(m.conn.SFTP, n)
-			}
+			return m, m.collapseSelected()
+		case "backspace":
+			return m, m.openRemoteDirectory(path.Dir(m.root.Path))
+		case "r", "f5":
+			return m, m.reloadSelectedDirectory()
+		case "/":
+			return m, m.openRemoteDirectory("/")
+		case "home":
+			return m, m.openRemoteDirectory(m.conn.Home)
 		}
 		return m, nil
 	}
@@ -728,6 +740,7 @@ func (m *Model) View() tea.View {
 	view.KeyboardEnhancements.ReportAlternateKeys = true
 	view.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
 	view.KeyboardEnhancements.ReportAssociatedText = true
+	view.MouseMode = tea.MouseModeCellMotion
 	return view
 }
 
@@ -762,7 +775,7 @@ func (m *Model) viewContent() string {
 func (m *Model) tabsView() string {
 	parts := make([]string, 0, len(m.tabs)+1)
 	used := 0
-	help := lipgloss.NewStyle().Foreground(muted).Render("^T +  ^W ×  Alt←/→")
+	help := renderHints([2]string{"^T", "+"}, [2]string{"^W", "×"}, [2]string{"Alt←/→", "вкладки"})
 	for index := range m.tabs {
 		label := fmt.Sprintf(" %d %s ", index+1, m.tabTitle(index))
 		style := lipgloss.NewStyle().Foreground(muted).Background(surface)
@@ -811,6 +824,13 @@ func (m *Model) contentHeight() int {
 }
 
 func (m *Model) connectedHints(width int) string {
+	if m.transferring {
+		return hintsView(width,
+			[][2]string{{"Ctrl+X", "отменить передачу"}, {"Ctrl+B", "SFTP"}, {"Esc q", "отключить"}},
+			[][2]string{{"^X", "отмена"}, {"^B", "SFTP"}},
+			[][2]string{{"^X", "отмена"}},
+		)
+	}
 	return hintsView(width,
 		[][2]string{
 			{"Ctrl+T", "новая вкладка"}, {"Ctrl+W", "закрыть"}, {"Alt+←/→", "вкладки"},
@@ -1015,11 +1035,20 @@ func (m *Model) filesView(width, height int) string {
 	if m.transferring || m.transferPath != "" {
 		lines = append(lines, m.progressView(width))
 	}
-	help := "^Space: фокус"
-	if width >= 27 {
-		help = "^Space фокус  ^D↓  ^U↑"
+	var help string
+	if m.transferring {
+		help = hintsView(width,
+			[][2]string{{"Ctrl+X", "отменить передачу"}},
+			[][2]string{{"^X", "отмена"}},
+		)
+	} else {
+		help = hintsView(width,
+			[][2]string{{"Ctrl+Space", "фокус"}, {"Ctrl+D", "скачать"}, {"Ctrl+U", "загрузить"}, {"F5", "обновить"}, {"/", "корень"}},
+			[][2]string{{"^D", "↓"}, {"^U", "↑"}, {"F5", "↻"}},
+			[][2]string{{"F5", "обновить"}},
+		)
 	}
-	lines = append(lines, subtitleStyle.Render(truncate(help, width)))
+	lines = append(lines, help)
 	return strings.Join(lines, "\n")
 }
 
@@ -1439,35 +1468,74 @@ func (m *Model) expandSelected() tea.Cmd {
 	}
 	if node.Expanded {
 		node.Expanded = false
+		node.Loaded, node.Loading = false, true
 		m.refreshFiles()
-		return nil
+		return loadDir(m.conn.SFTP, node)
 	}
-	node.Expanded = true
-	if node.Loaded {
-		m.refreshFiles()
-		return nil
-	}
-	node.Loading = true
+	node.Expanded, node.Loaded, node.Loading = true, false, true
 	m.refreshFiles()
 	return loadDir(m.conn.SFTP, node)
 }
 
-func (m *Model) collapseSelected() {
+func (m *Model) collapseSelected() tea.Cmd {
 	if len(m.visible) == 0 {
-		return
+		return nil
 	}
 	node := m.visible[m.fileCursor]
 	if node.Dir && node.Expanded {
-		node.Expanded = false
+		node.Expanded, node.Loaded, node.Loading = false, false, true
 		m.refreshFiles()
-		return
+		return loadDir(m.conn.SFTP, node)
 	}
 	for i := m.fileCursor - 1; i >= 0; i-- {
 		if m.visible[i].Depth < node.Depth {
 			m.fileCursor = i
-			return
+			return nil
 		}
 	}
+	if node == m.root && path.Clean(node.Path) != "/" {
+		return m.openRemoteDirectory(path.Dir(node.Path))
+	}
+	return nil
+}
+
+func (m *Model) openRemoteDirectory(directory string) tea.Cmd {
+	if m.conn == nil {
+		return nil
+	}
+	directory = path.Clean(directory)
+	if !path.IsAbs(directory) {
+		return nil
+	}
+	m.root = &fileNode{Name: directory, Path: directory, Dir: true, Expanded: true, Loading: true}
+	m.visible = []*fileNode{m.root}
+	m.fileCursor, m.fileOffset = 0, 0
+	m.status = "SFTP: загрузка " + directory
+	return loadDir(m.conn.SFTP, m.root)
+}
+
+func (m *Model) reloadSelectedDirectory() tea.Cmd {
+	if len(m.visible) == 0 || m.conn == nil {
+		return nil
+	}
+	node := m.visible[m.fileCursor]
+	if !node.Dir {
+		node = findParentFileNode(m.root, node)
+	}
+	if node == nil {
+		return nil
+	}
+	node.Loaded, node.Loading = false, true
+	m.status = "SFTP: обновление " + node.Path
+	return loadDir(m.conn.SFTP, node)
+}
+
+func (m *Model) cancelTransfer() {
+	if !m.transferring || m.transferCancel == nil {
+		return
+	}
+	m.status = "Отмена передачи файлов…"
+	m.transferCancel()
 }
 
 func (m *Model) startSelectedDownload(destination string, node *fileNode) tea.Cmd {
@@ -1830,6 +1898,21 @@ func findFileNode(root *fileNode, remotePath string) *fileNode {
 	for _, child := range root.Children {
 		if found := findFileNode(child, remotePath); found != nil {
 			return found
+		}
+	}
+	return nil
+}
+
+func findParentFileNode(root, child *fileNode) *fileNode {
+	if root == nil || child == nil {
+		return nil
+	}
+	for _, candidate := range root.Children {
+		if candidate == child {
+			return root
+		}
+		if parent := findParentFileNode(candidate, child); parent != nil {
+			return parent
 		}
 	}
 	return nil

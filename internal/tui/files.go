@@ -27,12 +27,14 @@ type fileNode struct {
 	Loaded   bool
 	Loading  bool
 	Children []*fileNode
+	loadID   uint64
 }
 
 type dirLoadedMsg struct {
 	node     *fileNode
 	children []*fileNode
 	err      error
+	loadID   uint64
 }
 
 type transferProgressMsg struct {
@@ -46,10 +48,12 @@ type transferProgressMsg struct {
 }
 
 func loadDir(client *sftp.Client, node *fileNode) tea.Cmd {
+	node.loadID++
+	loadID := node.loadID
 	return func() tea.Msg {
 		entries, err := client.ReadDir(node.Path)
 		if err != nil {
-			return dirLoadedMsg{node: node, err: err}
+			return dirLoadedMsg{node: node, err: err, loadID: loadID}
 		}
 		children := make([]*fileNode, 0, len(entries))
 		for _, entry := range entries {
@@ -67,8 +71,26 @@ func loadDir(client *sftp.Client, node *fileNode) tea.Cmd {
 			}
 			return strings.ToLower(children[i].Name) < strings.ToLower(children[j].Name)
 		})
-		return dirLoadedMsg{node: node, children: children}
+		return dirLoadedMsg{node: node, children: children, loadID: loadID}
 	}
+}
+
+func mergeFileNodes(old, fresh []*fileNode) []*fileNode {
+	byPath := make(map[string]*fileNode, len(old))
+	for _, node := range old {
+		byPath[node.Path] = node
+	}
+	for index, node := range fresh {
+		previous := byPath[node.Path]
+		if previous == nil || previous.Dir != node.Dir {
+			continue
+		}
+		previous.Name = node.Name
+		previous.Size = node.Size
+		previous.Depth = node.Depth
+		fresh[index] = previous
+	}
+	return fresh
 }
 
 func flattenTree(root *fileNode) []*fileNode {

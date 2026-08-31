@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -51,6 +52,35 @@ func TestTransferHotkeysNoLongerNeedShift(t *testing.T) {
 	_, uploadCmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'u', Mod: tea.ModCtrl}))
 	if m.picker == nil || m.picker.mode != pickerUploadSource || uploadCmd == nil {
 		t.Fatal("Ctrl+U did not open the upload source picker")
+	}
+}
+
+func TestTransferCanBeCancelledWithCtrlX(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &Model{page: pageConnected, transferring: true, transferCancel: cancel}
+	_, cmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'x', Mod: tea.ModCtrl}))
+	if cmd != nil {
+		t.Fatal("cancellation should not start another command")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("transfer context was not cancelled")
+	}
+	if !strings.Contains(m.status, "Отмена") {
+		t.Fatalf("status = %q", m.status)
+	}
+}
+
+func TestCancelledTransferFinishesWithoutErrorStatus(t *testing.T) {
+	updates := make(chan transferProgressMsg)
+	m := &Model{
+		page: pageConnected, transferring: true, transferCh: updates,
+		transferPath: "/tmp/partial", transferErr: context.Canceled,
+	}
+	_, _ = m.Update(transferProgressMsg{source: updates, final: true, err: context.Canceled})
+	if m.transferring || m.transferPath != "" || m.transferErr != nil || m.status != "Передача файлов отменена" {
+		t.Fatalf("cancelled state: transferring=%v path=%q err=%v status=%q", m.transferring, m.transferPath, m.transferErr, m.status)
 	}
 }
 
@@ -162,6 +192,103 @@ func TestCtrlBFocusesSFTPWhenPanelOpens(t *testing.T) {
 	_, _, _ = m.handleTabKey(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
 	if !m.sftpHidden || m.filesFocused {
 		t.Fatalf("closed SFTP state = hidden:%v focused:%v", m.sftpHidden, m.filesFocused)
+	}
+}
+
+func TestSFTPRootCanNavigateToParentAndFilesystemRoot(t *testing.T) {
+	root := &fileNode{Name: "/root", Path: "/root", Dir: true}
+	m := &Model{
+		page: pageConnected, filesFocused: true, conn: &remote.Connection{},
+		root: root, visible: []*fileNode{root},
+	}
+	if cmd := m.collapseSelected(); cmd == nil {
+		t.Fatal("moving to parent did not start a directory load")
+	}
+	if m.root.Path != "/" || m.fileCursor != 0 {
+		t.Fatalf("parent root = %q, cursor = %d", m.root.Path, m.fileCursor)
+	}
+	m.openRemoteDirectory("/opt")
+	if m.root.Path != "/opt" {
+		t.Fatalf("opened directory = %q", m.root.Path)
+	}
+}
+
+func TestDirectoryReloadsWhenCollapsedAndExpanded(t *testing.T) {
+	node := &fileNode{Name: "opt", Path: "/opt", Dir: true, Expanded: true, Loaded: true}
+	m := &Model{
+		page: pageConnected, filesFocused: true, conn: &remote.Connection{},
+		root: node, visible: []*fileNode{node},
+	}
+	if cmd := m.collapseSelected(); cmd == nil || node.Expanded || !node.Loading || node.Loaded {
+		t.Fatalf("collapse state: cmd=%v expanded=%v loading=%v loaded=%v", cmd != nil, node.Expanded, node.Loading, node.Loaded)
+	}
+	if cmd := m.expandSelected(); cmd == nil || !node.Expanded || !node.Loading || node.Loaded {
+		t.Fatalf("expand state: cmd=%v expanded=%v loading=%v loaded=%v", cmd != nil, node.Expanded, node.Loading, node.Loaded)
+	}
+	if node.loadID != 2 {
+		t.Fatalf("load generation = %d, want 2", node.loadID)
+	}
+}
+
+func TestMouseClickSwitchesConnectedPane(t *testing.T) {
+	m := &Model{width: 100, height: 30, page: pageConnected, sftpHidden: false}
+	_, _ = m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: 5, Y: 5, Button: tea.MouseLeft}))
+	if !m.filesFocused {
+		t.Fatal("click in SFTP pane did not focus it")
+	}
+	_, _ = m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: 60, Y: 5, Button: tea.MouseLeft}))
+	if m.filesFocused {
+		t.Fatal("click in terminal pane did not focus it")
+	}
+}
+
+func TestSFTPHintIsClickable(t *testing.T) {
+	root := &fileNode{Name: "/root", Path: "/root", Dir: true, Expanded: true, Loaded: true}
+	m := &Model{
+		width: 100, height: 30, page: pageConnected, tabID: 1, sftpHidden: false,
+		filesFocused: true, conn: &remote.Connection{}, root: root, visible: []*fileNode{root},
+		profile: config.Session{Name: "test", User: "root", Host: "host"}, term: newTerminalScreen(78, 25),
+	}
+	m.tabs = []*tabState{m.captureTab()}
+	x := -1
+	for candidate := 0; candidate < m.width; candidate++ {
+		if m.clickedHint(candidate, m.height-2) == "F5" {
+			x = candidate
+			break
+		}
+	}
+	if x < 0 {
+		t.Fatal("F5 hint has no mouse hit target")
+	}
+	_, cmd := m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: x, Y: m.height - 2, Button: tea.MouseLeft}))
+	if cmd == nil || !root.Loading || root.Loaded {
+		t.Fatalf("clicked reload state: cmd=%v loading=%v loaded=%v", cmd != nil, root.Loading, root.Loaded)
+	}
+}
+
+func TestSessionHintDescriptionIsClickable(t *testing.T) {
+	profile := config.Session{Name: "prod", Host: "host", Port: 22, User: "root"}
+	m := &Model{
+		width: 100, height: 30, page: pageSessions, tabID: 1,
+		config: config.Config{Sessions: []config.Session{profile}},
+	}
+	m.resetForm()
+	m.tabs = []*tabState{m.captureTab()}
+	foundX, foundY := -1, -1
+	for y := 1; y < m.height && foundX < 0; y++ {
+		for x := 0; x < m.width; x++ {
+			if m.clickedHint(x, y) == "n" {
+				foundX, foundY = x, y
+				break
+			}
+		}
+	}
+	if foundX < 0 {
+		t.Fatal("new-session hint has no mouse hit target")
+	}
+	_, _ = m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: foundX, Y: foundY, Button: tea.MouseLeft}))
+	if m.page != pageForm {
+		t.Fatalf("clicked new-session hint left page at %v", m.page)
 	}
 }
 
