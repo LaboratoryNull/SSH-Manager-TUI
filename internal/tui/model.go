@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/user"
 	"path"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,17 @@ const (
 	pageSessions page = iota
 	pageForm
 	pageConnected
+)
+
+const (
+	hostNameInput = iota
+	hostAddressInput
+	hostPortInput
+	hostCredentialInput
+	hostUserInput
+	hostPasswordInput
+	hostKeyInput
+	hostGroupInput
 )
 
 type connectMsg struct {
@@ -52,20 +64,22 @@ type escapeTimeoutMsg struct {
 }
 
 type tabState struct {
-	id          uint64
-	page        page
-	status      string
-	selected    int
-	confirm     bool
-	groupInput  *textinput.Model
-	groupCursor int
-	inputs      []textinput.Model
-	formFocus   int
-	testing     bool
-	connecting  bool
-	profile     config.Session
-	conn        *remote.Connection
-	term        *terminalScreen
+	id             uint64
+	page           page
+	status         string
+	selected       int
+	confirm        bool
+	groupInput     *textinput.Model
+	groupCursor    int
+	profileManager *profileManager
+	importWizard   *importWizard
+	inputs         []textinput.Model
+	formFocus      int
+	testing        bool
+	connecting     bool
+	profile        config.Session
+	conn           *remote.Connection
+	term           *terminalScreen
 
 	filesFocused  bool
 	sftpHidden    bool
@@ -92,21 +106,23 @@ type tabState struct {
 }
 
 type Model struct {
-	store         *config.Store
-	config        config.Config
-	tabs          []*tabState
-	activeTab     int
-	nextTabID     uint64
-	nextForwardID uint64
-	tabID         uint64
-	page          page
-	width         int
-	height        int
-	status        string
-	selected      int
-	confirm       bool
-	groupInput    *textinput.Model
-	groupCursor   int
+	store          *config.Store
+	config         config.Config
+	tabs           []*tabState
+	activeTab      int
+	nextTabID      uint64
+	nextForwardID  uint64
+	tabID          uint64
+	page           page
+	width          int
+	height         int
+	status         string
+	selected       int
+	confirm        bool
+	groupInput     *textinput.Model
+	groupCursor    int
+	profileManager *profileManager
+	importWizard   *importWizard
 
 	inputs     []textinput.Model
 	formFocus  int
@@ -340,6 +356,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleForwardStarted(msg)
 	case forwardErrorMsg:
 		return m.handleForwardError(msg)
+	case historyLoadedMsg:
+		return m.handleHistoryLoaded(msg)
 	case tea.KeyPressMsg:
 		if model, cmd, handled := m.handleTabKey(msg); handled {
 			return model, cmd
@@ -358,6 +376,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		*m.groupInput, cmd = m.groupInput.Update(message)
 		return m, cmd
 	}
+	if m.profileManager != nil {
+		return m.updateProfileManager(message)
+	}
+	if m.importWizard != nil {
+		return m.updateImportWizard(message)
+	}
 	if m.page == pageForm && m.formFocus < len(m.inputs) {
 		var cmd tea.Cmd
 		m.inputs[m.formFocus], cmd = m.inputs[m.formFocus].Update(message)
@@ -367,12 +391,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if key.String() == "ctrl+q" {
+	if matchesPlatformShortcut(key, 'q', false) {
 		m.close()
 		return m, tea.Quit
 	}
 	if m.hostKeyPrompt != nil {
 		return m.handleHostKeyPrompt(key)
+	}
+	if m.profileManager != nil {
+		return m.handleProfileManagerKey(key)
+	}
+	if m.importWizard != nil {
+		return m.handleImportKey(key)
 	}
 	if m.groupInput != nil {
 		return m.handleGroupKey(key)
@@ -389,21 +419,15 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleTabKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
-	s := key.Keystroke()
-	switch s {
-	case "ctrl+t":
+	if matchesPlatformShortcut(key, 't', false) {
 		m.openTab()
 		return m, nil, true
-	case "ctrl+w":
+	}
+	if matchesPlatformShortcut(key, 'w', false) {
 		m.closeActiveTab()
 		return m, nil, true
-	case "alt+left":
-		m.switchTab((m.activeTab - 1 + len(m.tabs)) % len(m.tabs))
-		return m, nil, true
-	case "alt+right":
-		m.switchTab((m.activeTab + 1) % len(m.tabs))
-		return m, nil, true
-	case "ctrl+b":
+	}
+	if matchesPlatformShortcut(key, 'b', false) {
 		if m.page == pageConnected {
 			m.sftpHidden = !m.sftpHidden
 			if m.sftpHidden {
@@ -413,6 +437,15 @@ func (m *Model) handleTabKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 			}
 			m.resizeRemote()
 		}
+		return m, nil, true
+	}
+	s := key.Keystroke()
+	switch s {
+	case "alt+left":
+		m.switchTab((m.activeTab - 1 + len(m.tabs)) % len(m.tabs))
+		return m, nil, true
+	case "alt+right":
+		m.switchTab((m.activeTab + 1) % len(m.tabs))
 		return m, nil, true
 	case "alt+p":
 		if m.page == pageConnected {
@@ -461,7 +494,7 @@ func (m *Model) handleSessionKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if err := m.store.Save(m.config); err != nil {
 				m.status = "Не удалось сохранить: " + err.Error()
 			} else {
-				m.status = "Профиль удалён"
+				m.status = "Хост удалён"
 			}
 		case "n", "N", "н", "Н", "esc":
 			m.confirm = false
@@ -487,20 +520,29 @@ func (m *Model) handleSessionKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		m.resetForm()
 		m.page, m.status = pageForm, ""
+	case "p":
+		m.profileManager = &profileManager{}
+	case "i":
+		return m, m.openHistoryImport()
 	case "d":
 		if len(m.config.Sessions) > 0 {
 			m.confirm = true
-			m.status = "Удалить профиль? y/n"
+			m.status = "Удалить хост? y/n"
 		}
 	case "g":
 		m.beginGroupEdit()
 	case "enter":
 		if len(m.config.Sessions) > 0 {
 			profile := m.config.Sessions[m.selected]
+			resolved, err := m.config.ResolveSession(profile)
+			if err != nil {
+				m.status = "Ошибка профиля: " + err.Error()
+				return m, nil
+			}
 			m.connecting = true
 			m.status = "Подключение к " + profile.Host + "…"
 			width, height := m.consoleSize()
-			return m, connectCommand(m.tabID, profile, width, height)
+			return m, connectCommand(m.tabID, resolved, width, height)
 		}
 	}
 	return m, nil
@@ -511,6 +553,16 @@ func (m *Model) handleFormKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	count := len(m.inputs) + 3
+	if m.formFocus == hostCredentialInput {
+		switch key.Keystroke() {
+		case "left":
+			m.cycleFormCredential(-1)
+			return m, nil
+		case "right":
+			m.cycleFormCredential(1)
+			return m, nil
+		}
+	}
 	switch key.String() {
 	case "esc":
 		m.page = pageSessions
@@ -540,13 +592,19 @@ func (m *Model) handleFormKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.connecting = true
-			m.status = "Профиль сохранён, подключение…"
+			m.status = "Хост сохранён, подключение…"
 			width, height := m.consoleSize()
-			return m, connectCommand(m.tabID, profile, width, height)
+			resolved, _ := m.config.ResolveSession(profile)
+			return m, connectCommand(m.tabID, resolved, width, height)
 		case 1:
+			resolved, resolveErr := m.config.ResolveSession(profile)
+			if resolveErr != nil {
+				m.status = "Ошибка профиля: " + resolveErr.Error()
+				return m, nil
+			}
 			m.testing = true
 			m.status = "Проверка ключа…"
-			return m, testKeyCommand(m.tabID, profile)
+			return m, testKeyCommand(m.tabID, resolved)
 		case 2:
 			m.page = pageSessions
 			m.blurInputs()
@@ -569,11 +627,11 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.picker != nil {
 		return m.handlePickerKey(key)
 	}
-	if m.transferring && s == "ctrl+x" {
+	if m.transferring && matchesPlatformShortcut(key, 'x', false) {
 		m.cancelTransfer()
 		return m, nil
 	}
-	if s == "ctrl+shift+c" && !m.filesFocused {
+	if matchesPlatformShortcut(key, 'c', true) && !m.filesFocused {
 		if m.term == nil || strings.TrimSpace(m.term.String()) == "" {
 			m.status = "В терминале пока нет текста для копирования"
 			return m, nil
@@ -599,17 +657,17 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.status = "Для выхода нажмите q после Esc"
 		return m, escapeTimeoutCommand(m.tabID, m.escapeID)
 	}
-	if s == "ctrl+space" || s == "ctrl+@" {
+	if matchesPlatformShortcut(key, tea.KeySpace, false) || (runtime.GOOS != "darwin" && s == "ctrl+@") {
 		if m.sftpHidden {
 			return m, nil
 		}
 		m.filesFocused = !m.filesFocused
 		return m, nil
 	}
-	if m.filesFocused && s == "ctrl+d" {
+	if m.filesFocused && matchesPlatformShortcut(key, 'd', false) {
 		return m, m.openDownloadPicker()
 	}
-	if m.filesFocused && s == "ctrl+u" {
+	if m.filesFocused && matchesPlatformShortcut(key, 'u', false) {
 		return m, m.openUploadPicker()
 	}
 	if m.filesFocused {
@@ -640,6 +698,9 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	data := keyBytes(key)
+	if m.term != nil {
+		data = m.term.KeyBytes(key)
+	}
 	if len(data) == 0 {
 		return m, nil
 	}
@@ -755,6 +816,12 @@ func (m *Model) viewContent() string {
 	if m.groupInput != nil {
 		return m.tabsView() + "\n" + m.groupPromptView()
 	}
+	if m.profileManager != nil {
+		return m.tabsView() + "\n" + m.profileManagerView()
+	}
+	if m.importWizard != nil {
+		return m.tabsView() + "\n" + m.importView()
+	}
 	switch m.page {
 	case pageForm:
 		content = m.formView()
@@ -775,7 +842,8 @@ func (m *Model) viewContent() string {
 func (m *Model) tabsView() string {
 	parts := make([]string, 0, len(m.tabs)+1)
 	used := 0
-	help := renderHints([2]string{"^T", "+"}, [2]string{"^W", "×"}, [2]string{"Alt←/→", "вкладки"})
+	keys := compactPlatformKeys()
+	help := renderHints([2]string{keys.newTab, "+"}, [2]string{keys.closeTab, "×"}, [2]string{keys.tabs, "вкладки"})
 	for index := range m.tabs {
 		label := fmt.Sprintf(" %d %s ", index+1, m.tabTitle(index))
 		style := lipgloss.NewStyle().Foreground(muted).Background(surface)
@@ -813,6 +881,12 @@ func (m *Model) tabTitle(index int) string {
 		}
 		return ellipsize(profile.Host, 18)
 	}
+	if index == m.activeTab && m.profileManager != nil {
+		return "Профили"
+	}
+	if index == m.activeTab && m.importWizard != nil {
+		return "Импорт"
+	}
 	if currentPage == pageForm {
 		return "Новая сессия"
 	}
@@ -824,25 +898,27 @@ func (m *Model) contentHeight() int {
 }
 
 func (m *Model) connectedHints(width int) string {
+	keys := currentPlatformKeys()
+	compact := compactPlatformKeys()
 	if m.transferring {
 		return hintsView(width,
-			[][2]string{{"Ctrl+X", "отменить передачу"}, {"Ctrl+B", "SFTP"}, {"Esc q", "отключить"}},
-			[][2]string{{"^X", "отмена"}, {"^B", "SFTP"}},
-			[][2]string{{"^X", "отмена"}},
+			[][2]string{{keys.cancel, "отменить передачу"}, {keys.toggleSFTP, "SFTP"}, {"Esc q", "отключить"}},
+			[][2]string{{compact.cancel, "отмена"}, {compact.toggleSFTP, "SFTP"}},
+			[][2]string{{compact.cancel, "отмена"}},
 		)
 	}
 	return hintsView(width,
 		[][2]string{
-			{"Ctrl+T", "новая вкладка"}, {"Ctrl+W", "закрыть"}, {"Alt+←/→", "вкладки"},
-			{"Alt+1…9", "по номеру"}, {"Ctrl+B", "SFTP"}, {"Ctrl+Shift+C", "копировать"}, {"Alt+P", "порты"}, {"Esc q", "отключить"},
+			{keys.newTab, "новая вкладка"}, {keys.closeTab, "закрыть"}, {keys.tabs, "вкладки"},
+			{keys.numberedTabs, "по номеру"}, {keys.toggleSFTP, "SFTP"}, {keys.copy, "копировать"}, {keys.ports, "порты"}, {"Esc q", "отключить"},
 		},
 		[][2]string{
-			{"^T", "+вкладка"}, {"^W", "закрыть"}, {"Alt←/→", "вкладки"},
-			{"^B", "SFTP"}, {"AltP", "порты"}, {"Esc q", "выход"},
+			{compact.newTab, "+вкладка"}, {compact.closeTab, "закрыть"}, {compact.tabs, "вкладки"},
+			{compact.toggleSFTP, "SFTP"}, {compact.ports, "порты"}, {"Esc q", "выход"},
 		},
-		[][2]string{{"^T", "+"}, {"^W", "×"}, {"^B", "SFTP"}, {"AltP", "порты"}, {"Esc q", "выход"}},
-		[][2]string{{"^T", "+"}, {"^W", "×"}, {"^B", "SFTP"}, {"AltP", "порты"}},
-		[][2]string{{"^B", "SFTP"}, {"AltP", "порты"}},
+		[][2]string{{compact.newTab, "+"}, {compact.closeTab, "×"}, {compact.toggleSFTP, "SFTP"}, {compact.ports, "порты"}, {"Esc q", "выход"}},
+		[][2]string{{compact.newTab, "+"}, {compact.closeTab, "×"}, {compact.toggleSFTP, "SFTP"}, {compact.ports, "порты"}},
+		[][2]string{{compact.toggleSFTP, "SFTP"}, {compact.ports, "порты"}},
 	)
 }
 
@@ -877,13 +953,14 @@ func (m *Model) sessionsView() string {
 			if profile.ConnectionCount > 0 {
 				frequency = lipgloss.NewStyle().Foreground(muted).Render(fmt.Sprintf("  ×%d", profile.ConnectionCount))
 			}
-			line := fmt.Sprintf("%s%s  %s%s", cursor, profile.Name, subtitleStyle.Render(fmt.Sprintf("%s@%s:%d", profile.User, profile.Host, profile.Port)), frequency)
+			line := fmt.Sprintf("%s%s  %s%s", cursor, profile.Name, subtitleStyle.Render(fmt.Sprintf("%s@%s:%d", m.sessionUser(profile), profile.Host, profile.Port)), frequency)
 			lines = append(lines, style.Render(line))
 		}
 	}
 	lines = append(lines, "", renderHints(
 		[2]string{"↑/↓", "выбор"}, [2]string{"Enter", "подключиться"},
-		[2]string{"n", "новая"}, [2]string{"g", "переместить"}, [2]string{"d", "удалить"}, [2]string{"q", "закрыть"},
+		[2]string{"n", "новая"}, [2]string{"p", "профили"}, [2]string{"i", "импорт"},
+		[2]string{"g", "переместить"}, [2]string{"d", "удалить"}, [2]string{"q", "закрыть"},
 	))
 	if m.status != "" {
 		lines = append(lines, "", statusLine(m.status))
@@ -902,7 +979,7 @@ func (m *Model) groupPromptView() string {
 	innerWidth := min(68, max(24, m.width-10))
 	lines := []string{
 		titleStyle.Render("Переместить хост"),
-		lipgloss.NewStyle().Foreground(muted).Render(truncate(profile.Name+"  "+profile.User+"@"+profile.Host, innerWidth)),
+		lipgloss.NewStyle().Foreground(muted).Render(truncate(profile.Name+"  "+m.sessionUser(profile)+"@"+profile.Host, innerWidth)),
 		"",
 		lipgloss.NewStyle().Foreground(accentAlt).Bold(true).Render("Группа"),
 		m.groupInput.View(),
@@ -937,7 +1014,7 @@ func (m *Model) groupPromptView() string {
 }
 
 func (m *Model) formView() string {
-	labels := []string{"Название", "Хост", "Порт", "Пользователь", "Пароль", "Приватный ключ", "Группа"}
+	labels := []string{"Название", "Хост", "Порт", "Профиль", "Пользователь", "Пароль", "Приватный ключ", "Группа"}
 	lines := []string{titleStyle.Render("◆ Новая SSH-сессия"), subtitleStyle.Render("Параметры подключения"), ""}
 	for i := range m.inputs {
 		labelStyle := lipgloss.NewStyle().Width(18).Foreground(muted)
@@ -946,6 +1023,9 @@ func (m *Model) formView() string {
 		}
 		label := labelStyle.Render(labels[i])
 		lines = append(lines, label+m.inputs[i].View())
+		if i == hostCredentialInput && m.formFocus == i {
+			lines = append(lines, lipgloss.NewStyle().Foreground(muted).Render("                  ←/→ выбрать сохранённый профиль; пусто = вручную"))
+		}
 	}
 	lines = append(lines, "")
 	buttons := []string{"Сохранить и подключить", "Проверить ключ", "Отмена"}
@@ -1036,15 +1116,17 @@ func (m *Model) filesView(width, height int) string {
 		lines = append(lines, m.progressView(width))
 	}
 	var help string
+	keys := currentPlatformKeys()
+	compact := compactPlatformKeys()
 	if m.transferring {
 		help = hintsView(width,
-			[][2]string{{"Ctrl+X", "отменить передачу"}},
-			[][2]string{{"^X", "отмена"}},
+			[][2]string{{keys.cancel, "отменить передачу"}},
+			[][2]string{{compact.cancel, "отмена"}},
 		)
 	} else {
 		help = hintsView(width,
-			[][2]string{{"Ctrl+Space", "фокус"}, {"Ctrl+D", "скачать"}, {"Ctrl+U", "загрузить"}, {"F5", "обновить"}, {"/", "корень"}},
-			[][2]string{{"^D", "↓"}, {"^U", "↑"}, {"F5", "↻"}},
+			[][2]string{{keys.focus, "фокус"}, {keys.download, "скачать"}, {keys.upload, "загрузить"}, {"F5", "обновить"}, {"/", "корень"}},
+			[][2]string{{compact.download, "↓"}, {compact.upload, "↑"}, {"F5", "↻"}},
 			[][2]string{{"F5", "обновить"}},
 		)
 	}
@@ -1144,8 +1226,8 @@ func (m *Model) pickerListHeight() int {
 
 func (m *Model) resetForm() {
 	values := []struct{ placeholder, value string }{
-		{"например, production", ""}, {"example.com", ""}, {"22", "22"}, {"root", currentUser()},
-		{"необязательно", ""}, {"~/.ssh/id_ed25519 (пусто = авто)", ""}, {"например, Production", ""},
+		{"например, production", ""}, {"example.com", ""}, {"22", "22"}, {"вручную (←/→ выбрать)", ""},
+		{"root", currentUser()}, {"необязательно", ""}, {"~/.ssh/id_ed25519 (пусто = авто)", ""}, {"например, Production", ""},
 	}
 	m.inputs = make([]textinput.Model, len(values))
 	for i, item := range values {
@@ -1164,8 +1246,8 @@ func (m *Model) resetForm() {
 		input.CharLimit = 512
 		m.inputs[i] = input
 	}
-	m.inputs[4].EchoMode = textinput.EchoPassword
-	m.inputs[4].EchoCharacter = '•'
+	m.inputs[hostPasswordInput].EchoMode = textinput.EchoPassword
+	m.inputs[hostPasswordInput].EchoCharacter = '•'
 	m.formFocus = 0
 	m.setFormFocus(0)
 }
@@ -1185,19 +1267,53 @@ func (m *Model) blurInputs() {
 }
 
 func (m *Model) formProfile() (config.Session, error) {
-	port, err := strconv.Atoi(strings.TrimSpace(m.inputs[2].Value()))
+	port, err := strconv.Atoi(strings.TrimSpace(m.inputs[hostPortInput].Value()))
 	if err != nil {
 		return config.Session{}, fmt.Errorf("порт должен быть числом")
 	}
 	profile := config.Session{
-		Name: strings.TrimSpace(m.inputs[0].Value()), Host: strings.TrimSpace(m.inputs[1].Value()),
-		Port: port, User: strings.TrimSpace(m.inputs[3].Value()), Password: m.inputs[4].Value(),
-		KeyPath: strings.TrimSpace(m.inputs[5].Value()), Group: strings.TrimSpace(m.inputs[6].Value()),
+		Name: strings.TrimSpace(m.inputs[hostNameInput].Value()), Host: strings.TrimSpace(m.inputs[hostAddressInput].Value()),
+		Port: port, CredentialProfile: strings.TrimSpace(m.inputs[hostCredentialInput].Value()),
+		User: strings.TrimSpace(m.inputs[hostUserInput].Value()), Password: m.inputs[hostPasswordInput].Value(),
+		KeyPath: strings.TrimSpace(m.inputs[hostKeyInput].Value()), Group: strings.TrimSpace(m.inputs[hostGroupInput].Value()),
+	}
+	if profile.CredentialProfile != "" {
+		if _, ok := m.config.UserProfile(profile.CredentialProfile); !ok {
+			return config.Session{}, fmt.Errorf("профиль %q не найден", profile.CredentialProfile)
+		}
+		profile.User, profile.Password, profile.KeyPath = "", "", ""
 	}
 	if err := profile.Validate(); err != nil {
 		return config.Session{}, err
 	}
 	return profile, nil
+}
+
+func (m *Model) cycleFormCredential(direction int) {
+	names := []string{""}
+	for _, profile := range m.config.UserProfiles {
+		names = append(names, profile.Name)
+	}
+	current := 0
+	for i, name := range names {
+		if strings.EqualFold(name, strings.TrimSpace(m.inputs[hostCredentialInput].Value())) {
+			current = i
+			break
+		}
+	}
+	current = (current + direction + len(names)) % len(names)
+	name := names[current]
+	m.inputs[hostCredentialInput].SetValue(name)
+	if name == "" {
+		m.inputs[hostUserInput].SetValue(currentUser())
+		m.inputs[hostPasswordInput].SetValue("")
+		m.inputs[hostKeyInput].SetValue("")
+		return
+	}
+	profile, _ := m.config.UserProfile(name)
+	m.inputs[hostUserInput].SetValue(profile.User)
+	m.inputs[hostPasswordInput].SetValue(profile.Password)
+	m.inputs[hostKeyInput].SetValue(profile.KeyPath)
 }
 
 func (m *Model) upsert(profile config.Session) {
@@ -1278,7 +1394,11 @@ func (m *Model) groupSuggestions() []string {
 	if m.groupInput == nil {
 		return nil
 	}
-	query := strings.ToLower(strings.TrimSpace(m.groupInput.Value()))
+	return m.filteredGroupSuggestions(m.groupInput.Value())
+}
+
+func (m *Model) filteredGroupSuggestions(value string) []string {
+	query := strings.ToLower(strings.TrimSpace(value))
 	var prefixes, contains []string
 	for _, group := range m.sessionGroups() {
 		lower := strings.ToLower(group)
@@ -1388,13 +1508,20 @@ func (m *Model) recordConnection(profile config.Session) error {
 			continue
 		}
 		m.config.Sessions[i].ConnectionCount++
-		m.profile = m.config.Sessions[i]
+		m.profile.ConnectionCount = m.config.Sessions[i].ConnectionCount
 		if m.store == nil {
 			return nil
 		}
 		return m.store.Save(m.config)
 	}
 	return nil
+}
+
+func (m *Model) sessionUser(session config.Session) string {
+	if resolved, err := m.config.ResolveSession(session); err == nil {
+		return resolved.User
+	}
+	return session.User
 }
 
 func (m *Model) layout() (fileW, consoleW, innerH, termW, termH int) {
@@ -1625,6 +1752,7 @@ func (m *Model) captureTab() *tabState {
 	return &tabState{
 		id: m.tabID, page: m.page, status: m.status, selected: m.selected, confirm: m.confirm,
 		groupInput: m.groupInput, groupCursor: m.groupCursor,
+		profileManager: m.profileManager, importWizard: m.importWizard,
 		inputs: m.inputs, formFocus: m.formFocus, testing: m.testing, connecting: m.connecting,
 		profile: m.profile, conn: m.conn, term: m.term,
 		filesFocused: m.filesFocused, sftpHidden: m.sftpHidden, root: m.root, visible: m.visible,
@@ -1649,6 +1777,7 @@ func (m *Model) restoreTab(index int) {
 	m.activeTab, m.tabID, m.page, m.status = index, state.id, state.page, state.status
 	m.selected, m.confirm = state.selected, state.confirm
 	m.groupInput, m.groupCursor = state.groupInput, state.groupCursor
+	m.profileManager, m.importWizard = state.profileManager, state.importWizard
 	m.inputs, m.formFocus, m.testing, m.connecting = state.inputs, state.formFocus, state.testing, state.connecting
 	m.profile, m.conn, m.term = state.profile, state.conn, state.term
 	m.filesFocused, m.sftpHidden = state.filesFocused, state.sftpHidden
@@ -1666,6 +1795,7 @@ func (m *Model) resetTab(id uint64) {
 	m.tabID, m.page, m.status, m.selected, m.confirm = id, pageSessions, "", 0, false
 	m.groupInput = nil
 	m.groupCursor = -1
+	m.profileManager, m.importWizard = nil, nil
 	if order := m.sessionOrder(); len(order) > 0 {
 		m.selected = order[0]
 	}
@@ -1795,6 +1925,8 @@ func (m *Model) messageTabIndex(message tea.Msg) (int, bool) {
 		return m.tabIndexByID(msg.tabID), true
 	case forwardErrorMsg:
 		return m.tabIndexByID(msg.tabID), true
+	case historyLoadedMsg:
+		return m.tabIndexByID(msg.tabID), true
 	default:
 		return -1, false
 	}
@@ -1919,6 +2051,10 @@ func findParentFileNode(root, child *fileNode) *fileNode {
 }
 
 func keyBytes(key tea.KeyPressMsg) []byte {
+	return keyBytesForMode(key, false)
+}
+
+func keyBytesForMode(key tea.KeyPressMsg, applicationCursor bool) []byte {
 	switch key.String() {
 	case "enter":
 		return []byte{'\r'}
@@ -1931,12 +2067,24 @@ func keyBytes(key tea.KeyPressMsg) []byte {
 	case "esc":
 		return []byte{0x1b}
 	case "up":
+		if applicationCursor {
+			return []byte("\x1bOA")
+		}
 		return []byte("\x1b[A")
 	case "down":
+		if applicationCursor {
+			return []byte("\x1bOB")
+		}
 		return []byte("\x1b[B")
 	case "right":
+		if applicationCursor {
+			return []byte("\x1bOC")
+		}
 		return []byte("\x1b[C")
 	case "left":
+		if applicationCursor {
+			return []byte("\x1bOD")
+		}
 		return []byte("\x1b[D")
 	case "home":
 		return []byte("\x1b[H")

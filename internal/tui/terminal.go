@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -38,29 +39,30 @@ type terminalSnapshot struct {
 // terminalScreen is an in-memory VT/xterm screen. Bubble Tea owns the real
 // terminal, so SSH output is interpreted here and rendered as styled cells.
 type terminalScreen struct {
-	w, h           int
-	cx, cy         int
-	savedX, savedY int
-	rows           [][]terminalCell
-	scrollTop      int
-	scrollBottom   int
-	state          int
-	csi            strings.Builder
-	osc            strings.Builder
-	utf8Buffer     []byte
-	style          terminalStyle
-	wrap           bool
-	originMode     bool
-	cursorVisible  bool
-	g0Graphics     bool
-	g1Graphics     bool
-	useG1          bool
-	charsetTarget  byte
-	altActive      bool
-	bracketedPaste bool
-	primary        *terminalSnapshot
-	responses      [][]byte
-	currentDir     string
+	w, h              int
+	cx, cy            int
+	savedX, savedY    int
+	rows              [][]terminalCell
+	scrollTop         int
+	scrollBottom      int
+	state             int
+	csi               strings.Builder
+	osc               strings.Builder
+	utf8Buffer        []byte
+	style             terminalStyle
+	wrap              bool
+	originMode        bool
+	applicationCursor bool
+	cursorVisible     bool
+	g0Graphics        bool
+	g1Graphics        bool
+	useG1             bool
+	charsetTarget     byte
+	altActive         bool
+	bracketedPaste    bool
+	primary           *terminalSnapshot
+	responses         [][]byte
+	currentDir        string
 }
 
 func newTerminalScreen(w, h int) *terminalScreen {
@@ -280,6 +282,13 @@ func (t *terminalScreen) PasteBytes(content string) []byte {
 	return []byte(content)
 }
 
+// KeyBytes encodes cursor keys according to DECCKM. Full-screen programs such
+// as htop and mc enable application cursor mode with CSI ? 1 h and expect SS3
+// sequences (ESC O A/B/C/D) until they disable it again.
+func (t *terminalScreen) KeyBytes(key tea.KeyPressMsg) []byte {
+	return keyBytesForMode(key, t.applicationCursor)
+}
+
 func (t *terminalScreen) put(r rune) {
 	if (t.useG1 && t.g1Graphics) || (!t.useG1 && t.g0Graphics) {
 		r = decSpecialRune(r)
@@ -496,6 +505,8 @@ func (t *terminalScreen) setMode(private bool, args []int, enabled bool) {
 	}
 	for _, mode := range args {
 		switch mode {
+		case 1:
+			t.applicationCursor = enabled
 		case 6:
 			t.originMode = enabled
 			t.cx = 0
@@ -635,7 +646,7 @@ func (t *terminalScreen) clearAll() {
 
 func (t *terminalScreen) reset() {
 	t.style = terminalStyle{}
-	t.wrap, t.originMode, t.cursorVisible = true, false, true
+	t.wrap, t.originMode, t.applicationCursor, t.cursorVisible = true, false, false, true
 	t.g0Graphics, t.g1Graphics, t.useG1 = false, false, false
 	t.scrollTop, t.scrollBottom = 0, t.h-1
 	t.cx, t.cy, t.savedX, t.savedY = 0, 0, 0, 0

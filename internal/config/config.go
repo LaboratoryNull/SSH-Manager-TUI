@@ -13,15 +13,36 @@ import (
 const fileName = ".ssh-manager-tui.json"
 
 type Session struct {
-	Name            string        `json:"name"`
-	Host            string        `json:"host"`
-	Port            int           `json:"port"`
-	User            string        `json:"user"`
-	Password        string        `json:"password,omitempty"`
-	KeyPath         string        `json:"key_path,omitempty"`
-	Group           string        `json:"group,omitempty"`
-	ConnectionCount uint64        `json:"connection_count,omitempty"`
-	PortForwards    []PortForward `json:"port_forwards,omitempty"`
+	Name              string        `json:"name"`
+	Host              string        `json:"host"`
+	Port              int           `json:"port"`
+	User              string        `json:"user"`
+	Password          string        `json:"password,omitempty"`
+	KeyPath           string        `json:"key_path,omitempty"`
+	CredentialProfile string        `json:"credential_profile,omitempty"`
+	Group             string        `json:"group,omitempty"`
+	ConnectionCount   uint64        `json:"connection_count,omitempty"`
+	PortForwards      []PortForward `json:"port_forwards,omitempty"`
+}
+
+type UserProfile struct {
+	Name     string `json:"name"`
+	User     string `json:"user"`
+	Password string `json:"password,omitempty"`
+	KeyPath  string `json:"key_path,omitempty"`
+}
+
+func (p UserProfile) Validate() error {
+	if strings.TrimSpace(p.Name) == "" {
+		return errors.New("profile name is required")
+	}
+	if strings.TrimSpace(p.User) == "" {
+		return errors.New("profile user is required")
+	}
+	if strings.IndexFunc(p.Name, unicode.IsControl) >= 0 {
+		return errors.New("profile name must not contain control characters")
+	}
+	return nil
 }
 
 type ForwardType string
@@ -75,7 +96,7 @@ func (s Session) Validate() error {
 	if strings.TrimSpace(s.Host) == "" {
 		return errors.New("host is required")
 	}
-	if strings.TrimSpace(s.User) == "" {
+	if strings.TrimSpace(s.User) == "" && strings.TrimSpace(s.CredentialProfile) == "" {
 		return errors.New("user is required")
 	}
 	if s.Port < 1 || s.Port > 65535 {
@@ -99,7 +120,65 @@ func (s Session) Validate() error {
 }
 
 type Config struct {
-	Sessions []Session `json:"sessions"`
+	Sessions     []Session     `json:"sessions"`
+	UserProfiles []UserProfile `json:"user_profiles,omitempty"`
+}
+
+func (c Config) UserProfile(name string) (UserProfile, bool) {
+	name = strings.TrimSpace(name)
+	for _, profile := range c.UserProfiles {
+		if strings.EqualFold(profile.Name, name) {
+			return profile, true
+		}
+	}
+	return UserProfile{}, false
+}
+
+func (c Config) ResolveSession(session Session) (Session, error) {
+	if strings.TrimSpace(session.CredentialProfile) == "" {
+		if err := session.Validate(); err != nil {
+			return Session{}, err
+		}
+		return session, nil
+	}
+	profile, ok := c.UserProfile(session.CredentialProfile)
+	if !ok {
+		return Session{}, fmt.Errorf("credential profile %q not found", session.CredentialProfile)
+	}
+	resolved := session
+	resolved.CredentialProfile = profile.Name
+	resolved.User = profile.User
+	resolved.Password = profile.Password
+	resolved.KeyPath = profile.KeyPath
+	if err := resolved.Validate(); err != nil {
+		return Session{}, err
+	}
+	return resolved, nil
+}
+
+func (c Config) Validate() error {
+	profileNames := make(map[string]struct{}, len(c.UserProfiles))
+	for _, profile := range c.UserProfiles {
+		if err := profile.Validate(); err != nil {
+			return fmt.Errorf("invalid user profile %q: %w", profile.Name, err)
+		}
+		name := strings.ToLower(strings.TrimSpace(profile.Name))
+		if _, exists := profileNames[name]; exists {
+			return fmt.Errorf("duplicate user profile %q", profile.Name)
+		}
+		profileNames[name] = struct{}{}
+	}
+	for _, session := range c.Sessions {
+		if err := session.Validate(); err != nil {
+			return fmt.Errorf("invalid session %q: %w", session.Name, err)
+		}
+		if session.CredentialProfile != "" {
+			if _, ok := c.UserProfile(session.CredentialProfile); !ok {
+				return fmt.Errorf("invalid session %q: credential profile %q not found", session.Name, session.CredentialProfile)
+			}
+		}
+	}
+	return nil
 }
 
 type Store struct {
@@ -137,10 +216,8 @@ func (s *Store) Load() (Config, error) {
 }
 
 func (s *Store) Save(cfg Config) error {
-	for _, session := range cfg.Sessions {
-		if err := session.Validate(); err != nil {
-			return fmt.Errorf("invalid session %q: %w", session.Name, err)
-		}
+	if err := cfg.Validate(); err != nil {
+		return err
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

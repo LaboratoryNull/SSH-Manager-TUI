@@ -432,25 +432,25 @@ func (m *Model) deleteSelectedForward() tea.Cmd {
 }
 
 func (m *Model) persistPortForwards(forwards []config.PortForward) error {
-	profile := m.profile
-	profile.PortForwards = append([]config.PortForward(nil), forwards...)
 	index := -1
 	for i := range m.config.Sessions {
-		if m.config.Sessions[i].Name == profile.Name {
+		if m.config.Sessions[i].Name == m.profile.Name {
 			index = i
 			break
 		}
 	}
 	if index < 0 {
-		return fmt.Errorf("профиль %q не найден", profile.Name)
+		return fmt.Errorf("хост %q не найден", m.profile.Name)
 	}
 	old := m.config.Sessions[index]
-	m.config.Sessions[index] = profile
+	stored := old
+	stored.PortForwards = append([]config.PortForward(nil), forwards...)
+	m.config.Sessions[index] = stored
 	if err := m.store.Save(m.config); err != nil {
 		m.config.Sessions[index] = old
 		return err
 	}
-	m.profile = profile
+	m.profile.PortForwards = append([]config.PortForward(nil), forwards...)
 	return nil
 }
 
@@ -502,7 +502,7 @@ func (m *Model) forwardView() string {
 func (m *Model) forwardListLines(width, boxHeight int) []string {
 	lines := []string{
 		titleStyle.Render("◆ Проброс портов"),
-		subtitleStyle.Render("Alt+P • ") + lipgloss.NewStyle().Foreground(muted).Render(m.profile.Name),
+		subtitleStyle.Render(currentPlatformKeys().ports+" • ") + lipgloss.NewStyle().Foreground(muted).Render(m.profile.Name),
 		"",
 	}
 	if len(m.profile.PortForwards) == 0 {

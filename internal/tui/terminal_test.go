@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
@@ -111,5 +112,30 @@ func TestTerminalPasteUsesRemoteBracketedPasteMode(t *testing.T) {
 	s.Feed([]byte("\x1b[?2004h"))
 	if got := string(s.PasteBytes("echo hi")); got != "\x1b[200~echo hi\x1b[201~" {
 		t.Fatalf("bracketed paste = %q", got)
+	}
+}
+
+func TestTerminalApplicationCursorModeEncodesArrowKeysForFullScreenApps(t *testing.T) {
+	s := newTerminalScreen(20, 2)
+	up := tea.KeyPressMsg(tea.Key{Code: tea.KeyUp})
+	down := tea.KeyPressMsg(tea.Key{Code: tea.KeyDown})
+	if got := string(s.KeyBytes(up)); got != "\x1b[A" {
+		t.Fatalf("normal cursor up = %q", got)
+	}
+
+	s.Feed([]byte("\x1b[?1h"))
+	if !s.applicationCursor {
+		t.Fatal("DECCKM application cursor mode was not enabled")
+	}
+	if got := string(s.KeyBytes(up)); got != "\x1bOA" {
+		t.Fatalf("application cursor up = %q", got)
+	}
+	if got := string(s.KeyBytes(down)); got != "\x1bOB" {
+		t.Fatalf("application cursor down = %q", got)
+	}
+
+	s.Feed([]byte("\x1b[?1l"))
+	if s.applicationCursor || string(s.KeyBytes(up)) != "\x1b[A" {
+		t.Fatal("DECCKM application cursor mode was not disabled")
 	}
 }

@@ -10,12 +10,15 @@ import (
 )
 
 var clickableHintLabels = []string{
-	"Ctrl+Shift+C", "Ctrl+Space", "Alt+1…9", "Alt+←/→", "←/Backspace",
+	"⌘Space", "⌘T", "⌘W", "⌘B", "⌘C", "⌘D", "⌘U", "⌘X", "⌘Q",
+	"⌥1…9", "⌥←/→", "⌥P",
+	"Ctrl+Shift+C", "Ctrl+Space", "Завершено", "Alt+1…9", "Alt+←/→", "←/Backspace",
 	"Tab/↑/↓", "n/н/Esc", "Ctrl+T", "Ctrl+W", "Ctrl+B", "Ctrl+D",
 	"Ctrl+U", "Ctrl+X", "Alt←/→", "Esc q", "n/e/d", "Alt+P", "AltP",
+	"p/←/→",
 	"^Space", "Enter", "Space", "Backspace", "↑/↓", "←/→", "y/д",
 	"shift+tab", "Tab", "Esc", "F5", "^T", "^W", "^B", "^D", "^U",
-	"^X", "n", "e", "d", "g", "q", "s", "u", "/",
+	"^X", "n", "e", "d", "g", "q", "s", "u", "p", "i", "a", "f", "/",
 }
 
 func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
@@ -48,8 +51,9 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) clickedTab(x int) int {
 	used := 0
+	keys := compactPlatformKeys()
 	helpWidth := runewidth.StringWidth(ansi.Strip(renderHints(
-		[2]string{"^T", "+"}, [2]string{"^W", "×"}, [2]string{"Alt←/→", "вкладки"},
+		[2]string{keys.newTab, "+"}, [2]string{keys.closeTab, "×"}, [2]string{keys.tabs, "вкладки"},
 	)))
 	for index := range m.tabs {
 		label := " " + strconv.Itoa(index+1) + " " + m.tabTitle(index) + " "
@@ -118,63 +122,82 @@ func (m *Model) activateHint(label string) (tea.Model, tea.Cmd) {
 	key := func(code rune, mod tea.KeyMod, text string) tea.KeyPressMsg {
 		return tea.KeyPressMsg(tea.Key{Code: code, Mod: mod, Text: text})
 	}
+	keys := currentPlatformKeys()
+	compact := compactPlatformKeys()
+	commandMod := platformCommandMod()
 	var press tea.KeyPressMsg
-	switch label {
-	case "Ctrl+T", "^T":
-		press = key('t', tea.ModCtrl, "")
-	case "Ctrl+W", "^W":
-		press = key('w', tea.ModCtrl, "")
-	case "Ctrl+B", "^B":
-		press = key('b', tea.ModCtrl, "")
-	case "Ctrl+D", "^D":
-		press = key('d', tea.ModCtrl, "")
-	case "Ctrl+U", "^U":
-		press = key('u', tea.ModCtrl, "")
-	case "Ctrl+X", "^X":
-		press = key('x', tea.ModCtrl, "")
-	case "Ctrl+Space", "^Space":
-		press = key(tea.KeySpace, tea.ModCtrl, "")
-	case "Ctrl+Shift+C":
-		press = key('c', tea.ModCtrl|tea.ModShift, "")
-	case "Alt+P", "AltP":
+	platformHint := true
+	switch {
+	case isPlatformHint(label, keys.newTab, compact.newTab):
+		press = key('t', commandMod, "")
+	case isPlatformHint(label, keys.closeTab, compact.closeTab):
+		press = key('w', commandMod, "")
+	case isPlatformHint(label, keys.toggleSFTP, compact.toggleSFTP):
+		press = key('b', commandMod, "")
+	case isPlatformHint(label, keys.download, compact.download):
+		press = key('d', commandMod, "")
+	case isPlatformHint(label, keys.upload, compact.upload):
+		press = key('u', commandMod, "")
+	case isPlatformHint(label, keys.cancel, compact.cancel):
+		press = key('x', commandMod, "")
+	case isPlatformHint(label, keys.focus, compact.focus):
+		press = key(tea.KeySpace, commandMod, "")
+	case isPlatformHint(label, keys.copy):
+		mod := commandMod
+		if keys.copy == "Ctrl+Shift+C" {
+			mod |= tea.ModShift
+		}
+		press = key('c', mod, "")
+	case isPlatformHint(label, keys.ports, compact.ports):
 		press = key('p', tea.ModAlt, "")
-	case "Alt+←/→", "Alt←/→", "Alt+1…9":
+	case isPlatformHint(label, keys.tabs, compact.tabs, keys.numberedTabs):
 		if len(m.tabs) > 1 {
 			m.switchTab((m.activeTab + 1) % len(m.tabs))
 		}
 		return m, nil
-	case "Esc q":
-		if m.page == pageConnected {
-			m.disconnect("Отключено")
-		}
-		return m, nil
-	case "Enter":
-		press = key(tea.KeyEnter, 0, "")
-	case "Space":
-		press = key(tea.KeySpace, 0, " ")
-	case "Tab", "Tab/↑/↓":
-		press = key(tea.KeyTab, 0, "")
-	case "shift+tab":
-		press = key(tea.KeyTab, tea.ModShift, "")
-	case "Esc", "n/н/Esc":
-		press = key(tea.KeyEsc, 0, "")
-	case "Backspace", "←/Backspace":
-		press = key(tea.KeyBackspace, 0, "")
-	case "↑/↓":
-		press = key(tea.KeyDown, 0, "")
-	case "←/→":
-		press = key(tea.KeyRight, 0, "")
-	case "F5":
-		press = key(tea.KeyF5, 0, "")
-	case "y/д":
-		press = key('y', 0, "y")
-	case "n/e/d":
-		press = key('n', 0, "n")
-	case "n", "e", "d", "g", "q", "s", "u", "/":
-		r := []rune(label)[0]
-		press = key(r, 0, string(r))
 	default:
-		return m, nil
+		platformHint = false
+	}
+	if !platformHint {
+		switch label {
+		case "Esc q":
+			if m.page == pageConnected {
+				m.disconnect("Отключено")
+			}
+			return m, nil
+		case "Завершено":
+			m.finishHistoryImport()
+			return m, nil
+		case "Enter":
+			press = key(tea.KeyEnter, 0, "")
+		case "Space":
+			press = key(tea.KeySpace, 0, " ")
+		case "Tab", "Tab/↑/↓":
+			press = key(tea.KeyTab, 0, "")
+		case "shift+tab":
+			press = key(tea.KeyTab, tea.ModShift, "")
+		case "Esc", "n/н/Esc":
+			press = key(tea.KeyEsc, 0, "")
+		case "Backspace", "←/Backspace":
+			press = key(tea.KeyBackspace, 0, "")
+		case "↑/↓":
+			press = key(tea.KeyDown, 0, "")
+		case "←/→":
+			press = key(tea.KeyRight, 0, "")
+		case "p/←/→":
+			press = key('p', 0, "p")
+		case "F5":
+			press = key(tea.KeyF5, 0, "")
+		case "y/д":
+			press = key('y', 0, "y")
+		case "n/e/d":
+			press = key('n', 0, "n")
+		case "n", "e", "d", "g", "q", "s", "u", "p", "i", "a", "f", "/":
+			r := []rune(label)[0]
+			press = key(r, 0, string(r))
+		default:
+			return m, nil
+		}
 	}
 	if model, cmd, handled := m.handleTabKey(press); handled {
 		return model, cmd
