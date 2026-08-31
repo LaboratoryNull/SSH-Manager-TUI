@@ -12,6 +12,7 @@ func TestStoreRoundTripAndPermissions(t *testing.T) {
 	store := NewStoreAt(path)
 	want := Config{Sessions: []Session{{
 		Name: "prod", Host: "server", Port: 22, User: "alice", Password: "plain",
+		Group: "Production", ConnectionCount: 12,
 		PortForwards: []PortForward{{
 			Name: "postgres", Type: ForwardLocal, BindHost: "127.0.0.1", BindPort: 5433,
 			TargetHost: "database", TargetPort: 5432, AutoStart: true,

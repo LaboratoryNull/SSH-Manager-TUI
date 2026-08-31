@@ -89,3 +89,27 @@ func TestTerminalScreenIgnoresDCS(t *testing.T) {
 		t.Fatalf("DCS leaked into the screen: %q", got)
 	}
 }
+
+func TestTerminalTracksOSC7CurrentDirectory(t *testing.T) {
+	s := newTerminalScreen(40, 4)
+	s.SetCurrentDirectory("/home/alice")
+	s.Feed([]byte("\x1b]7;file://server/var/www/My%20Site\x07"))
+	if got := s.CurrentDirectory(); got != "/var/www/My Site" {
+		t.Fatalf("current directory = %q", got)
+	}
+	s.Feed([]byte("\x1b]7;not-a-file-uri\x07"))
+	if got := s.CurrentDirectory(); got != "/var/www/My Site" {
+		t.Fatalf("current directory after invalid OSC = %q", got)
+	}
+}
+
+func TestTerminalPasteUsesRemoteBracketedPasteMode(t *testing.T) {
+	s := newTerminalScreen(20, 2)
+	if got := string(s.PasteBytes("echo hi")); got != "echo hi" {
+		t.Fatalf("plain paste = %q", got)
+	}
+	s.Feed([]byte("\x1b[?2004h"))
+	if got := string(s.PasteBytes("echo hi")); got != "\x1b[200~echo hi\x1b[201~" {
+		t.Fatalf("bracketed paste = %q", got)
+	}
+}

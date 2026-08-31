@@ -2,8 +2,10 @@ package tui
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -79,6 +81,36 @@ func TestSafeChildName(t *testing.T) {
 	for _, name := range []string{"../secret", "..", "dir/file"} {
 		if _, err := safeChildName(name); err == nil {
 			t.Fatalf("expected %q to be rejected", name)
+		}
+	}
+}
+
+func TestDroppedLocalPathsRecognizesQuotedEscapedAndURIPaths(t *testing.T) {
+	directory := t.TempDir()
+	first := filepath.Join(directory, "first file.txt")
+	second := filepath.Join(directory, "second")
+	if err := os.WriteFile(first, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	paths, ok := droppedLocalPaths("'" + first + "' " + strings.ReplaceAll(second, " ", "\\ "))
+	if !ok || len(paths) != 2 || paths[0] != first || paths[1] != second {
+		t.Fatalf("shell paths = %#v, ok=%v", paths, ok)
+	}
+	uriList := (&url.URL{Scheme: "file", Path: first}).String() + "\r\n" + (&url.URL{Scheme: "file", Path: second}).String()
+	paths, ok = droppedLocalPaths(uriList)
+	if !ok || len(paths) != 2 || paths[0] != first || paths[1] != second {
+		t.Fatalf("URI paths = %#v, ok=%v", paths, ok)
+	}
+}
+
+func TestDroppedLocalPathsLeavesOrdinaryPasteAlone(t *testing.T) {
+	for _, content := range []string{"ls -la", "echo /path/that/does/not/exist", "unterminated 'quote"} {
+		if paths, ok := droppedLocalPaths(content); ok {
+			t.Fatalf("ordinary paste %q recognized as %#v", content, paths)
 		}
 	}
 }

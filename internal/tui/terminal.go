@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -44,6 +46,7 @@ type terminalScreen struct {
 	scrollBottom   int
 	state          int
 	csi            strings.Builder
+	osc            strings.Builder
 	utf8Buffer     []byte
 	style          terminalStyle
 	wrap           bool
@@ -54,8 +57,10 @@ type terminalScreen struct {
 	useG1          bool
 	charsetTarget  byte
 	altActive      bool
+	bracketedPaste bool
 	primary        *terminalSnapshot
 	responses      [][]byte
+	currentDir     string
 }
 
 func newTerminalScreen(w, h int) *terminalScreen {
@@ -162,6 +167,7 @@ func (t *terminalScreen) controlByte(b byte) {
 			t.state = 2
 			t.csi.Reset()
 		case ']':
+			t.osc.Reset()
 			t.state = 3
 		case '(':
 			t.charsetTarget = 0
@@ -200,16 +206,24 @@ func (t *terminalScreen) controlByte(b byte) {
 		} else {
 			t.state = 0
 		}
-	case 3: // OSC: ignore titles, hyperlinks, and palette changes until BEL/ST.
+	case 3: // OSC: capture the current-directory notification; ignore others.
 		if b == 0x07 {
+			t.applyOSC(t.osc.String())
 			t.state = 0
 		} else if b == 0x1b {
 			t.state = 4
+		} else if t.osc.Len() < 4096 {
+			t.osc.WriteByte(b)
 		}
 	case 4:
 		if b == '\\' {
+			t.applyOSC(t.osc.String())
 			t.state = 0
 		} else {
+			if t.osc.Len() < 4095 {
+				t.osc.WriteByte(0x1b)
+				t.osc.WriteByte(b)
+			}
 			t.state = 3
 		}
 	case 5:
@@ -230,6 +244,40 @@ func (t *terminalScreen) controlByte(b byte) {
 			t.state = 6
 		}
 	}
+}
+
+// applyOSC handles OSC 7, the standard shell notification containing the
+// current working directory. Bash/zsh/fish integrations and many prompts emit
+// it, which lets drag-and-drop uploads follow `cd` without modifying the shell.
+func (t *terminalScreen) applyOSC(payload string) {
+	if !strings.HasPrefix(payload, "7;") {
+		return
+	}
+	raw := strings.TrimPrefix(payload, "7;")
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "file" || u.Path == "" {
+		return
+	}
+	directory, err := url.PathUnescape(u.EscapedPath())
+	if err != nil || !path.IsAbs(directory) {
+		return
+	}
+	t.currentDir = path.Clean(directory)
+}
+
+func (t *terminalScreen) SetCurrentDirectory(directory string) {
+	if path.IsAbs(directory) {
+		t.currentDir = path.Clean(directory)
+	}
+}
+
+func (t *terminalScreen) CurrentDirectory() string { return t.currentDir }
+
+func (t *terminalScreen) PasteBytes(content string) []byte {
+	if t.bracketedPaste {
+		return []byte("\x1b[200~" + content + "\x1b[201~")
+	}
+	return []byte(content)
 }
 
 func (t *terminalScreen) put(r rune) {
@@ -466,6 +514,8 @@ func (t *terminalScreen) setMode(private bool, args []int, enabled bool) {
 			} else {
 				t.exitAltScreen()
 			}
+		case 2004:
+			t.bracketedPaste = enabled
 		}
 	}
 }

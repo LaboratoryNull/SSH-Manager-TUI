@@ -2,6 +2,8 @@ package tui
 
 import (
 	"errors"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -148,6 +150,111 @@ func TestCtrlBTogglesSFTPPanel(t *testing.T) {
 	files, console, _, terminal, _ := m.layout()
 	if !handled || !m.sftpHidden || m.filesFocused || files != 0 || console != 100 || terminal != 98 {
 		t.Fatalf("hidden layout = hidden:%v focused:%v files:%d console:%d terminal:%d", m.sftpHidden, m.filesFocused, files, console, terminal)
+	}
+}
+
+func TestCtrlBFocusesSFTPWhenPanelOpens(t *testing.T) {
+	m := &Model{width: 100, height: 30, page: pageConnected, sftpHidden: true, filesFocused: false}
+	_, _, handled := m.handleTabKey(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
+	if !handled || m.sftpHidden || !m.filesFocused {
+		t.Fatalf("opened SFTP state = hidden:%v focused:%v", m.sftpHidden, m.filesFocused)
+	}
+	_, _, _ = m.handleTabKey(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
+	if !m.sftpHidden || m.filesFocused {
+		t.Fatalf("closed SFTP state = hidden:%v focused:%v", m.sftpHidden, m.filesFocused)
+	}
+}
+
+func TestQOnHostPickerClosesOnlyCurrentTab(t *testing.T) {
+	m := &Model{width: 80, height: 24, tabID: 1, nextTabID: 1, page: pageSessions, sftpHidden: true}
+	m.resetForm()
+	m.tabs = []*tabState{m.captureTab()}
+	m.openTab()
+	_, cmd := m.handleSessionKey(tea.KeyPressMsg(tea.Key{Code: 'q', Text: "q"}))
+	if cmd != nil || len(m.tabs) != 1 || m.activeTab != 0 || m.tabID != 1 {
+		t.Fatalf("q result: cmd=%v tabs=%d active=%d id=%d", cmd != nil, len(m.tabs), m.activeTab, m.tabID)
+	}
+}
+
+func TestSessionsAreGroupedAndOrderedByConnectionCount(t *testing.T) {
+	m := &Model{config: config.Config{Sessions: []config.Session{
+		{Name: "rare", Group: "Production", ConnectionCount: 1},
+		{Name: "ungrouped", ConnectionCount: 2},
+		{Name: "frequent", Group: "Production", ConnectionCount: 9},
+		{Name: "stage", Group: "Staging", ConnectionCount: 20},
+	}}}
+	order := m.sessionOrder()
+	want := []int{1, 2, 0, 3}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("session order = %v, want %v", order, want)
+	}
+	if order[1] != 2 || order[2] != 0 {
+		t.Fatal("frequent host was not placed above rare host in its group")
+	}
+}
+
+func TestGroupEditorMovesHostAndPersists(t *testing.T) {
+	store := config.NewStoreAt(filepath.Join(t.TempDir(), "config.json"))
+	m := &Model{store: store, width: 80, config: config.Config{Sessions: []config.Session{{Name: "prod", Host: "host", Port: 22, User: "root"}}}}
+	m.beginGroupEdit()
+	if m.groupInput == nil {
+		t.Fatal("group editor did not open")
+	}
+	m.groupInput.SetValue("Production")
+	_, _ = m.handleGroupKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Sessions[0].Group; got != "Production" {
+		t.Fatalf("saved group = %q", got)
+	}
+}
+
+func TestGroupEditorOffersAndCompletesExistingGroups(t *testing.T) {
+	store := config.NewStoreAt(filepath.Join(t.TempDir(), "config.json"))
+	valid := func(name, group string) config.Session {
+		return config.Session{Name: name, Host: name + ".example", Port: 22, User: "root", Group: group}
+	}
+	m := &Model{
+		store: store, width: 80, height: 24, selected: 0,
+		config: config.Config{Sessions: []config.Session{
+			valid("target", ""), valid("prod", "Production"), valid("personal", "Personal"), valid("stage", "Staging"),
+		}},
+	}
+	m.beginGroupEdit()
+	m.groupInput.SetValue("pro")
+	if suggestions := m.groupSuggestions(); !reflect.DeepEqual(suggestions, []string{"Production"}) {
+		t.Fatalf("suggestions = %#v", suggestions)
+	}
+	_, _ = m.handleGroupKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	_, _ = m.handleGroupKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab}))
+	if got := m.groupInput.Value(); got != "Production" {
+		t.Fatalf("completed group = %q", got)
+	}
+	_, _ = m.handleGroupKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Sessions[0].Group; got != "Production" {
+		t.Fatalf("saved completed group = %q", got)
+	}
+}
+
+func TestRecordConnectionPersistsFrequency(t *testing.T) {
+	store := config.NewStoreAt(filepath.Join(t.TempDir(), "config.json"))
+	profile := config.Session{Name: "prod", Host: "host", Port: 22, User: "root", ConnectionCount: 3}
+	m := &Model{store: store, config: config.Config{Sessions: []config.Session{profile}}}
+	if err := m.recordConnection(profile); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Sessions[0].ConnectionCount; got != 4 {
+		t.Fatalf("connection count = %d", got)
 	}
 }
 

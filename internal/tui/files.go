@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -139,6 +140,110 @@ func startUploads(ctx context.Context, client *sftp.Client, localSources []strin
 		}
 	}
 	updates <- transferProgressMsg{done: done, total: total, path: finalPath, final: true, uploading: true}
+}
+
+// droppedLocalPaths recognizes the text terminal emulators insert for files
+// dropped from a graphical file manager. Depending on the emulator this is a
+// shell-quoted path, an escaped path, or a text/uri-list containing file:// URLs.
+// Returning ok=false is important: ordinary pasted commands must still reach
+// the remote shell unchanged.
+func droppedLocalPaths(content string) (paths []string, ok bool) {
+	tokens, valid := splitDroppedText(content)
+	if !valid || len(tokens) == 0 {
+		return nil, false
+	}
+	seen := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		localPath := token
+		if strings.HasPrefix(token, "file://") {
+			u, err := url.Parse(token)
+			if err != nil || u.Scheme != "file" || (u.Host != "" && u.Host != "localhost") {
+				return nil, false
+			}
+			localPath, err = url.PathUnescape(u.EscapedPath())
+			if err != nil {
+				return nil, false
+			}
+		}
+		if !filepath.IsAbs(localPath) {
+			return nil, false
+		}
+		localPath = filepath.Clean(localPath)
+		if _, err := os.Lstat(localPath); err != nil {
+			return nil, false
+		}
+		if _, exists := seen[localPath]; !exists {
+			seen[localPath] = struct{}{}
+			paths = append(paths, localPath)
+		}
+	}
+	return paths, len(paths) > 0
+}
+
+func splitDroppedText(content string) ([]string, bool) {
+	content = strings.TrimSpace(content)
+	if content == "" || strings.ContainsRune(content, '\x00') {
+		return nil, false
+	}
+	// freedesktop drag-and-drop uses text/uri-list with one URI per line.
+	lines := strings.FieldsFunc(content, func(r rune) bool { return r == '\n' || r == '\r' })
+	allURIs := len(lines) > 0
+	for _, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "file://") {
+			allURIs = false
+			break
+		}
+	}
+	if allURIs {
+		result := make([]string, 0, len(lines))
+		for _, line := range lines {
+			result = append(result, strings.TrimSpace(line))
+		}
+		return result, true
+	}
+
+	var result []string
+	var token strings.Builder
+	var quote rune
+	escaped := false
+	flush := func() {
+		if token.Len() > 0 {
+			result = append(result, token.String())
+			token.Reset()
+		}
+	}
+	for _, r := range content {
+		if escaped {
+			token.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+			} else {
+				token.WriteRune(r)
+			}
+			continue
+		}
+		switch r {
+		case '\'', '"':
+			quote = r
+		case ' ', '\t', '\r', '\n':
+			flush()
+		default:
+			token.WriteRune(r)
+		}
+	}
+	if escaped || quote != 0 {
+		return nil, false
+	}
+	flush()
+	return result, true
 }
 
 func localSize(ctx context.Context, localPath string) (int64, error) {

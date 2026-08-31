@@ -7,18 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 const fileName = ".ssh-manager-tui.json"
 
 type Session struct {
-	Name         string        `json:"name"`
-	Host         string        `json:"host"`
-	Port         int           `json:"port"`
-	User         string        `json:"user"`
-	Password     string        `json:"password,omitempty"`
-	KeyPath      string        `json:"key_path,omitempty"`
-	PortForwards []PortForward `json:"port_forwards,omitempty"`
+	Name            string        `json:"name"`
+	Host            string        `json:"host"`
+	Port            int           `json:"port"`
+	User            string        `json:"user"`
+	Password        string        `json:"password,omitempty"`
+	KeyPath         string        `json:"key_path,omitempty"`
+	Group           string        `json:"group,omitempty"`
+	ConnectionCount uint64        `json:"connection_count,omitempty"`
+	PortForwards    []PortForward `json:"port_forwards,omitempty"`
 }
 
 type ForwardType string
@@ -77,6 +80,9 @@ func (s Session) Validate() error {
 	}
 	if s.Port < 1 || s.Port > 65535 {
 		return errors.New("port must be between 1 and 65535")
+	}
+	if strings.IndexFunc(s.Group, unicode.IsControl) >= 0 {
+		return errors.New("group must not contain control characters")
 	}
 	forwardNames := make(map[string]struct{}, len(s.PortForwards))
 	for _, forward := range s.PortForwards {

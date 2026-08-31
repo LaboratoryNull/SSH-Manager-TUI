@@ -287,8 +287,9 @@ type KnownHostKey struct {
 	Line        int
 }
 
-// HostKeyMismatchError describes a host whose presented key differs from all
-// keys already stored for it. It must only be accepted after user confirmation.
+// HostKeyMismatchError describes either a previously unknown host key or a key
+// that differs from all stored keys. Despite the historical name, Expected is
+// empty for an unknown host. Both cases require explicit user confirmation.
 type HostKeyMismatchError struct {
 	Hostname    string
 	Address     string
@@ -300,7 +301,12 @@ type HostKeyMismatchError struct {
 	managerFile string
 }
 
-func (e *HostKeyMismatchError) Error() string { return "knownhosts: key mismatch" }
+func (e *HostKeyMismatchError) Error() string {
+	if len(e.Expected) == 0 {
+		return "knownhosts: unknown host key"
+	}
+	return "knownhosts: key mismatch"
+}
 
 func AcceptHostKey(change *HostKeyMismatchError) error {
 	if change == nil || change.key == nil || change.managerFile == "" {
@@ -345,22 +351,18 @@ func hostKeyCallback() (ssh.HostKeyCallback, error) {
 		if !errors.As(err, &keyErr) {
 			return err
 		}
-		if len(keyErr.Want) != 0 {
-			expected := make([]KnownHostKey, 0, len(keyErr.Want))
-			for _, known := range keyErr.Want {
-				expected = append(expected, KnownHostKey{
-					Algorithm: known.Key.Type(), Fingerprint: ssh.FingerprintSHA256(known.Key),
-					Filename: known.Filename, Line: known.Line,
-				})
-			}
-			return &HostKeyMismatchError{
-				Hostname: knownhosts.Normalize(hostname), Address: remote.String(),
-				Algorithm: key.Type(), Fingerprint: ssh.FingerprintSHA256(key), Expected: expected,
-				key: key, managerFile: managerFile,
-			}
+		expected := make([]KnownHostKey, 0, len(keyErr.Want))
+		for _, known := range keyErr.Want {
+			expected = append(expected, KnownHostKey{
+				Algorithm: known.Key.Type(), Fingerprint: ssh.FingerprintSHA256(known.Key),
+				Filename: known.Filename, Line: known.Line,
+			})
 		}
-		// Trust on first use. Existing-but-different keys are rejected above.
-		return appendKnownHost(managerFile, hostname, key)
+		return &HostKeyMismatchError{
+			Hostname: knownhosts.Normalize(hostname), Address: remote.String(),
+			Algorithm: key.Type(), Fingerprint: ssh.FingerprintSHA256(key), Expected: expected,
+			key: key, managerFile: managerFile,
+		}
 	}, nil
 }
 
@@ -373,6 +375,7 @@ func appendKnownHost(managerFile, hostname string, key ssh.PublicKey) error {
 			if strings.TrimSpace(existingLine) == line {
 				return nil
 			}
+		}
 	}
 	file, err := os.OpenFile(managerFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {

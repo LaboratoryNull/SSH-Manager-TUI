@@ -56,22 +56,33 @@ func (m *Model) hostKeyPromptView() string {
 	boxWidth := min(96, max(50, m.width-6))
 	innerWidth := max(20, boxWidth-6)
 	change := prompt.change
-	lines := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(errorColor).Render("⚠ Ключ SSH-сервера изменился"),
-		"",
+	unknown := len(change.Expected) == 0
+	heading := "⚠ Ключ SSH-сервера изменился"
+	explanation := []string{
 		lipgloss.NewStyle().Foreground(warningColor).Render("Сохранённый ключ этого хоста не совпадает с полученным."),
 		lipgloss.NewStyle().Foreground(muted).Render("Это бывает после переустановки сервера, но также может означать MITM-атаку."),
+	}
+	if unknown {
+		heading = "Новый SSH-сервер"
+		explanation = []string{
+			lipgloss.NewStyle().Foreground(warningColor).Render("Ключ этого хоста ещё не сохранён."),
+			lipgloss.NewStyle().Foreground(muted).Render("Перед принятием сверьте SHA256-отпечаток с администратором сервера."),
+		}
+	}
+	lines := []string{
+		lipgloss.NewStyle().Bold(true).Foreground(errorColor).Render(heading),
+		"",
+		explanation[0],
+		explanation[1],
 		"",
 		fieldLine("Хост", change.Hostname, innerWidth),
 		fieldLine("Адрес", change.Address, innerWidth),
 		fieldLine("Алгоритм", change.Algorithm, innerWidth),
 		fieldLine("Новый SHA256", change.Fingerprint, innerWidth),
 		"",
-		lipgloss.NewStyle().Bold(true).Foreground(muted).Render("Ранее сохранённые ключи:"),
 	}
-	if len(change.Expected) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(muted).Italic(true).Render("нет данных"))
-	} else {
+	if !unknown {
+		lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(muted).Render("Ранее сохранённые ключи:"))
 		for _, expected := range change.Expected {
 			source := expected.Filename
 			if expected.Line > 0 {

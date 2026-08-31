@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,18 +52,20 @@ type escapeTimeoutMsg struct {
 }
 
 type tabState struct {
-	id         uint64
-	page       page
-	status     string
-	selected   int
-	confirm    bool
-	inputs     []textinput.Model
-	formFocus  int
-	testing    bool
-	connecting bool
-	profile    config.Session
-	conn       *remote.Connection
-	term       *terminalScreen
+	id          uint64
+	page        page
+	status      string
+	selected    int
+	confirm     bool
+	groupInput  *textinput.Model
+	groupCursor int
+	inputs      []textinput.Model
+	formFocus   int
+	testing     bool
+	connecting  bool
+	profile     config.Session
+	conn        *remote.Connection
+	term        *terminalScreen
 
 	filesFocused  bool
 	sftpHidden    bool
@@ -102,6 +105,8 @@ type Model struct {
 	status        string
 	selected      int
 	confirm       bool
+	groupInput    *textinput.Model
+	groupCursor   int
 
 	inputs     []textinput.Model
 	formFocus  int
@@ -163,6 +168,9 @@ func New(store *config.Store) (*Model, error) {
 	m := &Model{store: store, config: cfg, page: pageSessions, filesFocused: false, sftpHidden: true}
 	m.nextTabID, m.tabID = 1, 1
 	m.resetForm()
+	if order := m.sessionOrder(); len(order) > 0 {
+		m.selected = order[0]
+	}
 	m.tabs = []*tabState{m.captureTab()}
 	return m, nil
 }
@@ -213,6 +221,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.forwards = make(map[string]*forwardRuntime)
 		m.status = "Подключено"
 		m.resizeRemote()
+		m.term.SetCurrentDirectory(msg.conn.Home)
+		if err := m.recordConnection(msg.profile); err != nil {
+			m.status = "Подключено, но статистика не сохранена: " + err.Error()
+		}
 		m.root = &fileNode{Name: msg.conn.Home, Path: msg.conn.Home, Dir: true, Expanded: true, Loading: true}
 		m.visible = []*fileNode{m.root}
 		commands := []tea.Cmd{waitShellOutput(m.conn), loadDir(m.conn.SFTP, m.root)}
@@ -326,8 +338,17 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return model, cmd
 		}
 		return m.handleKey(msg)
+	case tea.PasteMsg:
+		if m.page == pageConnected {
+			return m.handleConnectedPaste(msg.Content)
+		}
 	}
 
+	if m.groupInput != nil {
+		var cmd tea.Cmd
+		*m.groupInput, cmd = m.groupInput.Update(message)
+		return m, cmd
+	}
 	if m.page == pageForm && m.formFocus < len(m.inputs) {
 		var cmd tea.Cmd
 		m.inputs[m.formFocus], cmd = m.inputs[m.formFocus].Update(message)
@@ -343,6 +364,9 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.hostKeyPrompt != nil {
 		return m.handleHostKeyPrompt(key)
+	}
+	if m.groupInput != nil {
+		return m.handleGroupKey(key)
 	}
 	switch m.page {
 	case pageSessions:
@@ -375,6 +399,8 @@ func (m *Model) handleTabKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 			m.sftpHidden = !m.sftpHidden
 			if m.sftpHidden {
 				m.filesFocused = false
+			} else {
+				m.filesFocused = true
 			}
 			m.resizeRemote()
 		}
@@ -400,6 +426,13 @@ func (m *Model) handleTabKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 }
 
 func (m *Model) handleSessionKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if len(m.config.Sessions) == 0 {
+		m.selected = 0
+		m.confirm = false
+	} else if m.selected < 0 || m.selected >= len(m.config.Sessions) {
+		m.selected = m.sessionOrder()[0]
+		m.confirm = false
+	}
 	if m.connecting {
 		if key.String() == "esc" {
 			m.status = "Ожидание сетевого подключения нельзя прервать мгновенно"
@@ -410,8 +443,10 @@ func (m *Model) handleSessionKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch key.String() {
 		case "y", "Y", "д", "Д":
 			m.config.Sessions = append(m.config.Sessions[:m.selected], m.config.Sessions[m.selected+1:]...)
-			if m.selected >= len(m.config.Sessions) && m.selected > 0 {
-				m.selected--
+			if order := m.sessionOrder(); len(order) > 0 {
+				m.selected = order[min(m.selected, len(order)-1)]
+			} else {
+				m.selected = 0
 			}
 			m.confirm = false
 			if err := m.store.Save(m.config); err != nil {
@@ -426,17 +461,20 @@ func (m *Model) handleSessionKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch key.String() {
-	case "ctrl+c", "q":
+	case "ctrl+c":
+		m.close()
+		return m, tea.Quit
+	case "q":
+		if len(m.tabs) > 1 {
+			m.closeActiveTab()
+			return m, nil
+		}
 		m.close()
 		return m, tea.Quit
 	case "up", "k":
-		if m.selected > 0 {
-			m.selected--
-		}
+		m.moveSessionSelection(-1)
 	case "down", "j":
-		if m.selected+1 < len(m.config.Sessions) {
-			m.selected++
-		}
+		m.moveSessionSelection(1)
 	case "n":
 		m.resetForm()
 		m.page, m.status = pageForm, ""
@@ -445,6 +483,8 @@ func (m *Model) handleSessionKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.confirm = true
 			m.status = "Удалить профиль? y/n"
 		}
+	case "g":
+		m.beginGroupEdit()
 	case "enter":
 		if len(m.config.Sessions) > 0 {
 			profile := m.config.Sessions[m.selected]
@@ -520,6 +560,14 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.picker != nil {
 		return m.handlePickerKey(key)
 	}
+	if s == "ctrl+shift+c" && !m.filesFocused {
+		if m.term == nil || strings.TrimSpace(m.term.String()) == "" {
+			m.status = "В терминале пока нет текста для копирования"
+			return m, nil
+		}
+		m.status = "Текст видимой области терминала скопирован"
+		return m, tea.SetClipboard(strings.TrimRight(m.term.String(), "\n"))
+	}
 	if m.escapePending {
 		m.escapePending = false
 		if s == "q" {
@@ -585,6 +633,31 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if err := m.conn.Send(data); err != nil {
 		m.status = "Ошибка записи в SSH: " + err.Error()
+	}
+	return m, nil
+}
+
+func (m *Model) handleConnectedPaste(content string) (tea.Model, tea.Cmd) {
+	if m.forwardModal != nil || m.picker != nil || m.filesFocused || m.conn == nil {
+		return m, nil
+	}
+	if localPaths, ok := droppedLocalPaths(content); ok {
+		remoteDirectory := m.conn.Home
+		if m.term != nil && m.term.CurrentDirectory() != "" {
+			remoteDirectory = m.term.CurrentDirectory()
+		}
+		target := findFileNode(m.root, remoteDirectory)
+		if target == nil {
+			target = &fileNode{Name: path.Base(remoteDirectory), Path: remoteDirectory, Dir: true}
+		}
+		return m, m.startUpload(localPaths, target)
+	}
+	data := []byte(content)
+	if m.term != nil {
+		data = m.term.PasteBytes(content)
+	}
+	if err := m.conn.Send(data); err != nil {
+		m.status = "Ошибка вставки в SSH: " + err.Error()
 	}
 	return m, nil
 }
@@ -666,6 +739,9 @@ func (m *Model) viewContent() string {
 	if m.hostKeyPrompt != nil {
 		return m.tabsView() + "\n" + m.hostKeyPromptView()
 	}
+	if m.groupInput != nil {
+		return m.tabsView() + "\n" + m.groupPromptView()
+	}
 	switch m.page {
 	case pageForm:
 		content = m.formView()
@@ -738,7 +814,7 @@ func (m *Model) connectedHints(width int) string {
 	return hintsView(width,
 		[][2]string{
 			{"Ctrl+T", "новая вкладка"}, {"Ctrl+W", "закрыть"}, {"Alt+←/→", "вкладки"},
-			{"Alt+1…9", "по номеру"}, {"Ctrl+B", "SFTP"}, {"Alt+P", "порты"}, {"Esc q", "отключить"},
+			{"Alt+1…9", "по номеру"}, {"Ctrl+B", "SFTP"}, {"Ctrl+Shift+C", "копировать"}, {"Alt+P", "порты"}, {"Esc q", "отключить"},
 		},
 		[][2]string{
 			{"^T", "+вкладка"}, {"^W", "закрыть"}, {"Alt←/→", "вкладки"},
@@ -756,20 +832,38 @@ func (m *Model) sessionsView() string {
 	if len(m.config.Sessions) == 0 {
 		lines = append(lines, lipgloss.NewStyle().Foreground(muted).Italic(true).Render("Сохранённых сессий пока нет."))
 	} else {
-		for i, profile := range m.config.Sessions {
+		previousGroup := "\x00"
+		for _, i := range m.sessionOrder() {
+			profile := m.config.Sessions[i]
+			group := strings.TrimSpace(profile.Group)
+			if group != previousGroup {
+				if previousGroup != "\x00" {
+					lines = append(lines, "")
+				}
+				groupLabel := group
+				if groupLabel == "" {
+					groupLabel = "Без группы"
+				}
+				lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(accentWarm).Render("▰ "+groupLabel))
+				previousGroup = group
+			}
 			cursor := "  "
 			style := lipgloss.NewStyle().Foreground(textColor)
 			if i == m.selected {
 				cursor = "▸ "
 				style = selectedStyle.Copy().Padding(0, 1)
 			}
-			line := fmt.Sprintf("%s%s  %s", cursor, profile.Name, subtitleStyle.Render(fmt.Sprintf("%s@%s:%d", profile.User, profile.Host, profile.Port)))
+			frequency := ""
+			if profile.ConnectionCount > 0 {
+				frequency = lipgloss.NewStyle().Foreground(muted).Render(fmt.Sprintf("  ×%d", profile.ConnectionCount))
+			}
+			line := fmt.Sprintf("%s%s  %s%s", cursor, profile.Name, subtitleStyle.Render(fmt.Sprintf("%s@%s:%d", profile.User, profile.Host, profile.Port)), frequency)
 			lines = append(lines, style.Render(line))
 		}
 	}
 	lines = append(lines, "", renderHints(
 		[2]string{"↑/↓", "выбор"}, [2]string{"Enter", "подключиться"},
-		[2]string{"n", "новая"}, [2]string{"d", "удалить"}, [2]string{"q", "выход"},
+		[2]string{"n", "новая"}, [2]string{"g", "переместить"}, [2]string{"d", "удалить"}, [2]string{"q", "закрыть"},
 	))
 	if m.status != "" {
 		lines = append(lines, "", statusLine(m.status))
@@ -779,8 +873,51 @@ func (m *Model) sessionsView() string {
 	return lipgloss.Place(m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, box)
 }
 
+func (m *Model) groupPromptView() string {
+	if m.groupInput == nil || m.selected < 0 || m.selected >= len(m.config.Sessions) {
+		return m.sessionsView()
+	}
+	profile := m.config.Sessions[m.selected]
+	suggestions := m.groupSuggestions()
+	innerWidth := min(68, max(24, m.width-10))
+	lines := []string{
+		titleStyle.Render("Переместить хост"),
+		lipgloss.NewStyle().Foreground(muted).Render(truncate(profile.Name+"  "+profile.User+"@"+profile.Host, innerWidth)),
+		"",
+		lipgloss.NewStyle().Foreground(accentAlt).Bold(true).Render("Группа"),
+		m.groupInput.View(),
+		"",
+		lipgloss.NewStyle().Foreground(muted).Bold(true).Render("Подсказки"),
+	}
+	start := 0
+	if m.groupCursor >= 5 {
+		start = m.groupCursor - 4
+	}
+	end := min(len(suggestions), start+5)
+	for i := start; i < end; i++ {
+		prefix := "  "
+		style := lipgloss.NewStyle().Foreground(textColor).Width(innerWidth)
+		if i == m.groupCursor {
+			prefix = "▸ "
+			style = selectedStyle.Copy().Foreground(accentAlt).Width(innerWidth)
+		}
+		lines = append(lines, style.Render(truncate(prefix+suggestions[i], innerWidth)))
+	}
+	if len(suggestions) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(muted).Italic(true).Render("Нет совпадений — будет создана новая группа"))
+	}
+	lines = append(lines,
+		"",
+		lipgloss.NewStyle().Foreground(muted).Render("Пустое поле означает «Без группы»."),
+		"",
+		renderHints([2]string{"↑/↓", "выбрать"}, [2]string{"Tab", "подставить"}, [2]string{"Enter", "сохранить"}, [2]string{"Esc", "отмена"}),
+	)
+	box := borderStyle.Copy().BorderForeground(accentWarm).Padding(1, 2).Width(innerWidth + 4).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, box)
+}
+
 func (m *Model) formView() string {
-	labels := []string{"Название", "Хост", "Порт", "Пользователь", "Пароль", "Приватный ключ"}
+	labels := []string{"Название", "Хост", "Порт", "Пользователь", "Пароль", "Приватный ключ", "Группа"}
 	lines := []string{titleStyle.Render("◆ Новая SSH-сессия"), subtitleStyle.Render("Параметры подключения"), ""}
 	for i := range m.inputs {
 		labelStyle := lipgloss.NewStyle().Width(18).Foreground(muted)
@@ -979,7 +1116,7 @@ func (m *Model) pickerListHeight() int {
 func (m *Model) resetForm() {
 	values := []struct{ placeholder, value string }{
 		{"например, production", ""}, {"example.com", ""}, {"22", "22"}, {"root", currentUser()},
-		{"необязательно", ""}, {"~/.ssh/id_ed25519 (пусто = авто)", ""},
+		{"необязательно", ""}, {"~/.ssh/id_ed25519 (пусто = авто)", ""}, {"например, Production", ""},
 	}
 	m.inputs = make([]textinput.Model, len(values))
 	for i, item := range values {
@@ -1026,7 +1163,7 @@ func (m *Model) formProfile() (config.Session, error) {
 	profile := config.Session{
 		Name: strings.TrimSpace(m.inputs[0].Value()), Host: strings.TrimSpace(m.inputs[1].Value()),
 		Port: port, User: strings.TrimSpace(m.inputs[3].Value()), Password: m.inputs[4].Value(),
-		KeyPath: strings.TrimSpace(m.inputs[5].Value()),
+		KeyPath: strings.TrimSpace(m.inputs[5].Value()), Group: strings.TrimSpace(m.inputs[6].Value()),
 	}
 	if err := profile.Validate(); err != nil {
 		return config.Session{}, err
@@ -1040,6 +1177,7 @@ func (m *Model) upsert(profile config.Session) {
 			if profile.PortForwards == nil {
 				profile.PortForwards = append([]config.PortForward(nil), m.config.Sessions[i].PortForwards...)
 			}
+			profile.ConnectionCount = m.config.Sessions[i].ConnectionCount
 			m.config.Sessions[i] = profile
 			m.selected = i
 			return
@@ -1047,6 +1185,187 @@ func (m *Model) upsert(profile config.Session) {
 	}
 	m.config.Sessions = append(m.config.Sessions, profile)
 	m.selected = len(m.config.Sessions) - 1
+}
+
+func (m *Model) sessionOrder() []int {
+	order := make([]int, len(m.config.Sessions))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		left, right := m.config.Sessions[order[a]], m.config.Sessions[order[b]]
+		leftGroup, rightGroup := strings.ToLower(strings.TrimSpace(left.Group)), strings.ToLower(strings.TrimSpace(right.Group))
+		if leftGroup != rightGroup {
+			if leftGroup == "" {
+				return true
+			}
+			if rightGroup == "" {
+				return false
+			}
+			return leftGroup < rightGroup
+		}
+		if left.ConnectionCount != right.ConnectionCount {
+			return left.ConnectionCount > right.ConnectionCount
+		}
+		return strings.ToLower(left.Name) < strings.ToLower(right.Name)
+	})
+	return order
+}
+
+func (m *Model) moveSessionSelection(delta int) {
+	order := m.sessionOrder()
+	if len(order) == 0 {
+		m.selected = 0
+		return
+	}
+	position := 0
+	for i, index := range order {
+		if index == m.selected {
+			position = i
+			break
+		}
+	}
+	position = clamp(position+delta, 0, len(order)-1)
+	m.selected = order[position]
+}
+
+func (m *Model) sessionGroups() []string {
+	seen := make(map[string]string)
+	for _, session := range m.config.Sessions {
+		group := strings.TrimSpace(session.Group)
+		if group != "" {
+			seen[strings.ToLower(group)] = group
+		}
+	}
+	groups := make([]string, 0, len(seen))
+	for _, group := range seen {
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(i, j int) bool { return strings.ToLower(groups[i]) < strings.ToLower(groups[j]) })
+	return groups
+}
+
+func (m *Model) groupSuggestions() []string {
+	if m.groupInput == nil {
+		return nil
+	}
+	query := strings.ToLower(strings.TrimSpace(m.groupInput.Value()))
+	var prefixes, contains []string
+	for _, group := range m.sessionGroups() {
+		lower := strings.ToLower(group)
+		if query == "" || strings.HasPrefix(lower, query) {
+			prefixes = append(prefixes, group)
+		} else if strings.Contains(lower, query) {
+			contains = append(contains, group)
+		}
+	}
+	return append(prefixes, contains...)
+}
+
+func (m *Model) beginGroupEdit() {
+	if m.selected < 0 || m.selected >= len(m.config.Sessions) {
+		return
+	}
+	input := textinput.New()
+	styles := textinput.DefaultDarkStyles()
+	styles.Focused.Text = lipgloss.NewStyle().Foreground(textColor)
+	styles.Focused.Placeholder = lipgloss.NewStyle().Foreground(borderMuted).Italic(true)
+	styles.Cursor.Color = accentWarm
+	input.SetStyles(styles)
+	input.Prompt = "▸ "
+	input.Placeholder = "Без группы"
+	input.SetWidth(min(60, max(16, m.width-16)))
+	input.CharLimit = 128
+	input.SetValue(m.config.Sessions[m.selected].Group)
+	input.Focus()
+	m.groupInput = &input
+	m.groupCursor = -1
+}
+
+func (m *Model) handleGroupKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.groupInput == nil {
+		return m, nil
+	}
+	switch key.Keystroke() {
+	case "esc":
+		m.groupInput = nil
+		m.groupCursor = -1
+		m.status = "Перемещение отменено"
+		return m, nil
+	case "down", "ctrl+n":
+		suggestions := m.groupSuggestions()
+		if len(suggestions) > 0 {
+			m.groupCursor = (m.groupCursor + 1) % len(suggestions)
+		}
+		return m, nil
+	case "up", "ctrl+p":
+		suggestions := m.groupSuggestions()
+		if len(suggestions) > 0 {
+			if m.groupCursor < 0 {
+				m.groupCursor = len(suggestions) - 1
+			} else {
+				m.groupCursor = (m.groupCursor - 1 + len(suggestions)) % len(suggestions)
+			}
+		}
+		return m, nil
+	case "tab":
+		suggestions := m.groupSuggestions()
+		if len(suggestions) > 0 {
+			index := m.groupCursor
+			if index < 0 || index >= len(suggestions) {
+				index = 0
+			}
+			m.groupInput.SetValue(suggestions[index])
+			m.groupInput.CursorEnd()
+			m.groupCursor = -1
+		}
+		return m, nil
+	case "enter":
+		if m.selected < 0 || m.selected >= len(m.config.Sessions) {
+			m.groupInput = nil
+			return m, nil
+		}
+		group := strings.TrimSpace(m.groupInput.Value())
+		if suggestions := m.groupSuggestions(); m.groupCursor >= 0 && m.groupCursor < len(suggestions) {
+			group = suggestions[m.groupCursor]
+		}
+		if strings.IndexFunc(group, unicode.IsControl) >= 0 {
+			m.status = "Название группы не должно содержать управляющие символы"
+			return m, nil
+		}
+		old := m.config.Sessions[m.selected].Group
+		m.config.Sessions[m.selected].Group = group
+		m.groupInput = nil
+		m.groupCursor = -1
+		if err := m.store.Save(m.config); err != nil {
+			m.config.Sessions[m.selected].Group = old
+			m.status = "Не удалось переместить хост: " + err.Error()
+		} else if group == "" {
+			m.status = "Хост перемещён в раздел «Без группы»"
+		} else {
+			m.status = "Хост перемещён в группу «" + group + "»"
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	*m.groupInput, cmd = m.groupInput.Update(key)
+	m.groupCursor = -1
+	return m, cmd
+}
+
+func (m *Model) recordConnection(profile config.Session) error {
+	for i := range m.config.Sessions {
+		if m.config.Sessions[i].Name != profile.Name {
+			continue
+		}
+		m.config.Sessions[i].ConnectionCount++
+		m.profile = m.config.Sessions[i]
+		if m.store == nil {
+			return nil
+		}
+		return m.store.Save(m.config)
+	}
+	return nil
 }
 
 func (m *Model) layout() (fileW, consoleW, innerH, termW, termH int) {
@@ -1229,7 +1548,7 @@ func (m *Model) startUpload(localSources []string, target *fileNode) tea.Cmd {
 	m.transferring, m.transferCh, m.transferCancel = true, updates, cancel
 	m.transferDone, m.transferTotal, m.transferPath, m.transferErr = 0, 0, strings.Join(localSources, ", "), nil
 	m.transferUpload, m.transferRemoteTarget = true, target
-	m.status = fmt.Sprintf("Подсчёт размера и загрузка: %d объект(ов)", len(localSources))
+	m.status = fmt.Sprintf("Подсчёт размера и загрузка %d объект(ов) в %s", len(localSources), target.Path)
 	go startUploads(ctx, m.conn.SFTP, localSources, target.Path, updates)
 	return waitTransfer(updates)
 }
@@ -1237,6 +1556,7 @@ func (m *Model) startUpload(localSources []string, target *fileNode) tea.Cmd {
 func (m *Model) captureTab() *tabState {
 	return &tabState{
 		id: m.tabID, page: m.page, status: m.status, selected: m.selected, confirm: m.confirm,
+		groupInput: m.groupInput, groupCursor: m.groupCursor,
 		inputs: m.inputs, formFocus: m.formFocus, testing: m.testing, connecting: m.connecting,
 		profile: m.profile, conn: m.conn, term: m.term,
 		filesFocused: m.filesFocused, sftpHidden: m.sftpHidden, root: m.root, visible: m.visible,
@@ -1260,6 +1580,7 @@ func (m *Model) restoreTab(index int) {
 	state := m.tabs[index]
 	m.activeTab, m.tabID, m.page, m.status = index, state.id, state.page, state.status
 	m.selected, m.confirm = state.selected, state.confirm
+	m.groupInput, m.groupCursor = state.groupInput, state.groupCursor
 	m.inputs, m.formFocus, m.testing, m.connecting = state.inputs, state.formFocus, state.testing, state.connecting
 	m.profile, m.conn, m.term = state.profile, state.conn, state.term
 	m.filesFocused, m.sftpHidden = state.filesFocused, state.sftpHidden
@@ -1275,6 +1596,11 @@ func (m *Model) restoreTab(index int) {
 
 func (m *Model) resetTab(id uint64) {
 	m.tabID, m.page, m.status, m.selected, m.confirm = id, pageSessions, "", 0, false
+	m.groupInput = nil
+	m.groupCursor = -1
+	if order := m.sessionOrder(); len(order) > 0 {
+		m.selected = order[0]
+	}
 	m.testing, m.connecting = false, false
 	m.profile, m.conn, m.term = config.Session{}, nil, nil
 	m.filesFocused, m.sftpHidden = false, true
@@ -1492,6 +1818,21 @@ func treeContains(root, wanted *fileNode) bool {
 		}
 	}
 	return false
+}
+
+func findFileNode(root *fileNode, remotePath string) *fileNode {
+	if root == nil {
+		return nil
+	}
+	if path.Clean(root.Path) == path.Clean(remotePath) && root.Dir {
+		return root
+	}
+	for _, child := range root.Children {
+		if found := findFileNode(child, remotePath); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 func keyBytes(key tea.KeyPressMsg) []byte {
