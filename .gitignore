@@ -1,0 +1,4 @@
+/ssh-manager
+*.log
+*.test
+.idea/

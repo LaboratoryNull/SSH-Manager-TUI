@@ -1,0 +1,173 @@
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const fileName = ".ssh-manager-tui.json"
+
+type Session struct {
+	Name         string        `json:"name"`
+	Host         string        `json:"host"`
+	Port         int           `json:"port"`
+	User         string        `json:"user"`
+	Password     string        `json:"password,omitempty"`
+	KeyPath      string        `json:"key_path,omitempty"`
+	PortForwards []PortForward `json:"port_forwards,omitempty"`
+}
+
+type ForwardType string
+
+const (
+	ForwardLocal   ForwardType = "local"
+	ForwardRemote  ForwardType = "remote"
+	ForwardDynamic ForwardType = "dynamic"
+)
+
+type PortForward struct {
+	Name       string      `json:"name"`
+	Type       ForwardType `json:"type"`
+	BindHost   string      `json:"bind_host"`
+	BindPort   int         `json:"bind_port"`
+	TargetHost string      `json:"target_host,omitempty"`
+	TargetPort int         `json:"target_port,omitempty"`
+	AutoStart  bool        `json:"auto_start,omitempty"`
+}
+
+func (f PortForward) Validate() error {
+	if strings.TrimSpace(f.Name) == "" {
+		return errors.New("forward name is required")
+	}
+	switch f.Type {
+	case ForwardLocal, ForwardRemote, ForwardDynamic:
+	default:
+		return fmt.Errorf("unsupported forward type %q", f.Type)
+	}
+	if strings.TrimSpace(f.BindHost) == "" {
+		return errors.New("bind host is required")
+	}
+	if f.BindPort < 1 || f.BindPort > 65535 {
+		return errors.New("bind port must be between 1 and 65535")
+	}
+	if f.Type != ForwardDynamic {
+		if strings.TrimSpace(f.TargetHost) == "" {
+			return errors.New("target host is required")
+		}
+		if f.TargetPort < 1 || f.TargetPort > 65535 {
+			return errors.New("target port must be between 1 and 65535")
+		}
+	}
+	return nil
+}
+
+func (s Session) Validate() error {
+	if strings.TrimSpace(s.Name) == "" {
+		return errors.New("session name is required")
+	}
+	if strings.TrimSpace(s.Host) == "" {
+		return errors.New("host is required")
+	}
+	if strings.TrimSpace(s.User) == "" {
+		return errors.New("user is required")
+	}
+	if s.Port < 1 || s.Port > 65535 {
+		return errors.New("port must be between 1 and 65535")
+	}
+	forwardNames := make(map[string]struct{}, len(s.PortForwards))
+	for _, forward := range s.PortForwards {
+		if err := forward.Validate(); err != nil {
+			return fmt.Errorf("invalid port forward %q: %w", forward.Name, err)
+		}
+		name := strings.ToLower(strings.TrimSpace(forward.Name))
+		if _, exists := forwardNames[name]; exists {
+			return fmt.Errorf("duplicate port forward name %q", forward.Name)
+		}
+		forwardNames[name] = struct{}{}
+	}
+	return nil
+}
+
+type Config struct {
+	Sessions []Session `json:"sessions"`
+}
+
+type Store struct {
+	path string
+}
+
+func NewStore() (*Store, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("locate home directory: %w", err)
+	}
+	return &Store{path: filepath.Join(home, fileName)}, nil
+}
+
+func NewStoreAt(path string) *Store { return &Store{path: path} }
+
+func (s *Store) Path() string { return s.path }
+
+func (s *Store) Load() (Config, error) {
+	data, err := os.ReadFile(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Config{}, nil
+	}
+	if err != nil {
+		return Config{}, fmt.Errorf("read %s: %w", s.path, err)
+	}
+	if err := os.Chmod(s.path, 0o600); err != nil {
+		return Config{}, fmt.Errorf("secure %s: %w", s.path, err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parse %s: %w", s.path, err)
+	}
+	return cfg, nil
+}
+
+func (s *Store) Save(cfg Config) error {
+	for _, session := range cfg.Sessions {
+		if err := session.Validate(); err != nil {
+			return fmt.Errorf("invalid session %q: %w", session.Name, err)
+		}
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	data = append(data, '\n')
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create config directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".ssh-manager-tui-*")
+	if err != nil {
+		return fmt.Errorf("create temporary config: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close config: %w", err)
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		return fmt.Errorf("replace config: %w", err)
+	}
+	return os.Chmod(s.path, 0o600)
+}
