@@ -65,25 +65,27 @@ type escapeTimeoutMsg struct {
 }
 
 type tabState struct {
-	id             uint64
-	page           page
-	status         string
-	selected       int
-	confirm        bool
-	groupInput     *textinput.Model
-	groupCursor    int
-	profileManager *profileManager
-	importWizard   *importWizard
-	inputs         []textinput.Model
-	formFocus      int
-	testing        bool
-	connecting     bool
-	profile        config.Session
-	conn           *remote.Connection
-	term           *terminalScreen
-	selection      *terminalSelection
-	clipboardPaste bool
-	rightPasteDown bool
+	id               uint64
+	page             page
+	status           string
+	selected         int
+	confirm          bool
+	groupInput       *textinput.Model
+	groupCursor      int
+	profileManager   *profileManager
+	importWizard     *importWizard
+	inputs           []textinput.Model
+	formFocus        int
+	formSessionIndex int
+	formSessionName  string
+	testing          bool
+	connecting       bool
+	profile          config.Session
+	conn             *remote.Connection
+	term             *terminalScreen
+	selection        *terminalSelection
+	clipboardPaste   bool
+	rightPasteDown   bool
 
 	filesFocused    bool
 	sftpHidden      bool
@@ -137,10 +139,12 @@ type Model struct {
 	profileManager      *profileManager
 	importWizard        *importWizard
 
-	inputs     []textinput.Model
-	formFocus  int
-	testing    bool
-	connecting bool
+	inputs           []textinput.Model
+	formFocus        int
+	formSessionIndex int
+	formSessionName  string
+	testing          bool
+	connecting       bool
 
 	profile        config.Session
 	conn           *remote.Connection
@@ -181,6 +185,7 @@ type Model struct {
 }
 
 var (
+	background    = lipgloss.Color("#11111B")
 	accent        = lipgloss.Color("#7D56F4")
 	accentAlt     = lipgloss.Color("#5AF7DC")
 	accentWarm    = lipgloss.Color("#FF75B7")
@@ -191,6 +196,7 @@ var (
 	errorColor    = lipgloss.Color("#F38BA8")
 	successColor  = lipgloss.Color("#A6E3A1")
 	warningColor  = lipgloss.Color("#F9E2AF")
+	contrastText  = lipgloss.Color("#11111B")
 	borderStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(borderMuted)
 	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(accentWarm)
 	subtitleStyle = lipgloss.NewStyle().Foreground(accentAlt)
@@ -204,6 +210,8 @@ func New(store *config.Store) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg.Theme = normalizedThemeID(cfg.Theme)
+	applyTheme(cfg.Theme)
 	m := &Model{store: store, config: cfg, page: pageSessions, filesFocused: false, sftpHidden: true}
 	m.nextTabID, m.tabID = 1, 1
 	m.resetForm()
@@ -608,6 +616,8 @@ func (m *Model) handleSessionKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "n":
 		m.resetForm()
 		m.page, m.status = pageForm, ""
+	case "e":
+		m.beginSessionEdit()
 	case "p":
 		m.profileManager = &profileManager{}
 	case "i":
@@ -619,6 +629,8 @@ func (m *Model) handleSessionKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "g":
 		m.beginGroupEdit()
+	case "t", "е":
+		m.cycleTheme()
 	case "enter":
 		if len(m.config.Sessions) > 0 {
 			profile := m.config.Sessions[m.selected]
@@ -654,6 +666,8 @@ func (m *Model) handleFormKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "esc":
 		m.page = pageSessions
+		m.formSessionIndex = -1
+		m.formSessionName = ""
 		m.blurInputs()
 		return m, nil
 	case "tab", "down":
@@ -674,9 +688,35 @@ func (m *Model) handleFormKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		switch m.formFocus - len(m.inputs) {
 		case -1, 0:
+			editing := m.formSessionName != ""
+			if editing {
+				m.formSessionIndex = m.editedSessionIndex()
+				if m.formSessionIndex < 0 {
+					m.status = "Редактируемый хост больше не существует"
+					return m, nil
+				}
+				for index, existing := range m.config.Sessions {
+					if index != m.formSessionIndex && existing.Name == profile.Name {
+						m.status = "Хост с таким названием уже существует"
+						return m, nil
+					}
+				}
+			}
+			oldSessions := append([]config.Session(nil), m.config.Sessions...)
+			oldSelected := m.selected
 			m.upsert(profile)
 			if err := m.store.Save(m.config); err != nil {
+				m.config.Sessions = oldSessions
+				m.selected = oldSelected
 				m.status = "Не удалось сохранить: " + err.Error()
+				return m, nil
+			}
+			if editing {
+				m.page = pageSessions
+				m.formSessionIndex = -1
+				m.formSessionName = ""
+				m.blurInputs()
+				m.status = "Хост обновлён"
 				return m, nil
 			}
 			m.connecting = true
@@ -695,6 +735,8 @@ func (m *Model) handleFormKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, testKeyCommand(m.tabID, resolved)
 		case 2:
 			m.page = pageSessions
+			m.formSessionIndex = -1
+			m.formSessionName = ""
 			m.blurInputs()
 		}
 		return m, nil
@@ -935,6 +977,8 @@ func (m *Model) handlePickerKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) View() tea.View {
 	view := tea.NewView(m.viewContent())
+	view.BackgroundColor = background
+	view.ForegroundColor = textColor
 	view.AltScreen = true
 	view.KeyboardEnhancements.ReportAlternateKeys = true
 	view.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
@@ -986,11 +1030,14 @@ func (m *Model) tabsView() string {
 	used := 0
 	keys := compactPlatformKeys()
 	help := renderHints([2]string{keys.newTab, "+"}, [2]string{keys.closeTab, "×"}, [2]string{keys.tabs, "вкладки"})
+	if m.themeHintVisible() {
+		help += "  " + renderHints([2]string{"t", "тема: " + currentThemeName(m.config.Theme)})
+	}
 	for index := range m.tabs {
 		label := fmt.Sprintf(" %d %s ", index+1, m.tabTitle(index))
 		style := lipgloss.NewStyle().Foreground(muted).Background(surface)
 		if index == m.activeTab {
-			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#11111B")).Background(accent).Bold(true)
+			style = lipgloss.NewStyle().Foreground(contrastText).Background(accent).Bold(true)
 		}
 		rendered := style.Render(label)
 		separatorWidth := 1
@@ -1008,11 +1055,17 @@ func (m *Model) tabsView() string {
 	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Render(line)
 }
 
+func (m *Model) themeHintVisible() bool {
+	return m.page == pageSessions && m.groupInput == nil && m.profileManager == nil && m.importWizard == nil && m.hostKeyPrompt == nil
+}
+
 func (m *Model) tabTitle(index int) string {
 	state := m.tabs[index]
 	currentPage, profile, connecting, reconnecting := state.page, state.profile, state.connecting, state.reconnect != nil
+	formSessionName := state.formSessionName
 	if index == m.activeTab {
 		currentPage, profile, connecting, reconnecting = m.page, m.profile, m.connecting, m.reconnect != nil
+		formSessionName = m.formSessionName
 	}
 	if connecting {
 		return "Подключение…"
@@ -1034,6 +1087,9 @@ func (m *Model) tabTitle(index int) string {
 		return "Импорт"
 	}
 	if currentPage == pageForm {
+		if formSessionName != "" {
+			return "Редактирование"
+		}
 		return "Новая сессия"
 	}
 	return "Выбор хоста"
@@ -1095,17 +1151,13 @@ func (m *Model) sessionsView() string {
 				cursor = "▸ "
 				style = selectedStyle.Copy().Padding(0, 1)
 			}
-			frequency := ""
-			if profile.ConnectionCount > 0 {
-				frequency = lipgloss.NewStyle().Foreground(muted).Render(fmt.Sprintf("  ×%d", profile.ConnectionCount))
-			}
-			line := fmt.Sprintf("%s%s  %s%s", cursor, profile.Name, subtitleStyle.Render(fmt.Sprintf("%s@%s:%d", m.sessionUser(profile), profile.Host, profile.Port)), frequency)
+			line := fmt.Sprintf("%s%s  %s", cursor, profile.Name, subtitleStyle.Render(fmt.Sprintf("%s@%s:%d", m.sessionUser(profile), profile.Host, profile.Port)))
 			lines = append(lines, style.Render(line))
 		}
 	}
 	lines = append(lines, "", renderHints(
 		[2]string{"↑/↓", "выбор"}, [2]string{"Enter", "подключиться"},
-		[2]string{"n", "новая"}, [2]string{"p", "профили"}, [2]string{"i", "импорт"},
+		[2]string{"n", "новая"}, [2]string{"e", "изменить"}, [2]string{"p", "профили"}, [2]string{"i", "импорт"},
 		[2]string{"g", "переместить"}, [2]string{"d", "удалить"}, [2]string{"q", "закрыть"},
 	))
 	if m.status != "" {
@@ -1161,7 +1213,13 @@ func (m *Model) groupPromptView() string {
 
 func (m *Model) formView() string {
 	labels := []string{"Название", "Хост", "Порт", "Профиль", "Пользователь", "Пароль", "Приватный ключ", "Группа"}
-	lines := []string{titleStyle.Render("◆ Новая SSH-сессия"), subtitleStyle.Render("Параметры подключения"), ""}
+	title := "◆ Новая SSH-сессия"
+	primaryAction := "Сохранить и подключить"
+	if m.formSessionName != "" {
+		title = "◆ Редактирование хоста"
+		primaryAction = "Сохранить"
+	}
+	lines := []string{titleStyle.Render(title), subtitleStyle.Render("Параметры подключения"), ""}
 	for i := range m.inputs {
 		labelStyle := lipgloss.NewStyle().Width(18).Foreground(muted)
 		if m.formFocus == i {
@@ -1174,12 +1232,12 @@ func (m *Model) formView() string {
 		}
 	}
 	lines = append(lines, "")
-	buttons := []string{"Сохранить и подключить", "Проверить ключ", "Отмена"}
+	buttons := []string{primaryAction, "Проверить ключ", "Отмена"}
 	var rendered []string
 	for i, label := range buttons {
 		style := lipgloss.NewStyle().Padding(0, 1).Foreground(muted).Background(surface)
 		if m.formFocus == len(m.inputs)+i {
-			style = style.Background(accent).Foreground(lipgloss.Color("#11111B")).Bold(true)
+			style = style.Background(accent).Foreground(contrastText).Bold(true)
 		}
 		rendered = append(rendered, style.Render(label))
 	}
@@ -1311,10 +1369,32 @@ func (m *Model) progressView(width int) string {
 		detail = fmt.Sprintf("%3.0f%%", ratio*100)
 		barW = max(1, width-lipgloss.Width(detail)-1)
 	}
-	filled := min(barW, int(ratio*float64(barW)))
-	bar := lipgloss.NewStyle().Foreground(accent).Render(strings.Repeat("█", filled)) +
-		lipgloss.NewStyle().Foreground(borderMuted).Render(strings.Repeat("░", barW-filled))
+	bar := progressBar(m.config.Theme, barW, ratio)
 	return subtitleStyle.Copy().Bold(true).Render(nameLine) + "\n" + bar + " " + warningColorStyle(detail)
+}
+
+func progressBar(themeID string, width int, ratio float64) string {
+	width = max(1, width)
+	ratio = min(1.0, max(0.0, ratio))
+	if normalizedThemeID(themeID) != themeWin98 || width < 4 {
+		filled := min(width, int(ratio*float64(width)))
+		return lipgloss.NewStyle().Foreground(accent).Render(strings.Repeat("█", filled)) +
+			lipgloss.NewStyle().Foreground(borderMuted).Render(strings.Repeat("░", width-filled))
+	}
+
+	// Windows 9x used discrete blue blocks inside a recessed progress track.
+	// A square followed by a space preserves that segmented look in a terminal.
+	innerWidth := width - 2
+	segments := innerWidth / 2
+	filledSegments := min(segments, int(ratio*float64(segments)))
+	trackStyle := lipgloss.NewStyle().Background(surface)
+	filled := trackStyle.Foreground(accent).Render(strings.Repeat("■ ", filledSegments))
+	empty := trackStyle.Render(strings.Repeat("  ", segments-filledSegments))
+	if innerWidth%2 != 0 {
+		empty += trackStyle.Render(" ")
+	}
+	edgeStyle := lipgloss.NewStyle().Foreground(borderMuted).Background(surface)
+	return edgeStyle.Render("[") + filled + empty + edgeStyle.Render("]")
 }
 
 func compactTransferName(value string) string {
@@ -1414,6 +1494,8 @@ func (m *Model) pickerListHeight() int {
 }
 
 func (m *Model) resetForm() {
+	m.formSessionIndex = -1
+	m.formSessionName = ""
 	values := []struct{ placeholder, value string }{
 		{"например, production", ""}, {"example.com", ""}, {"22", "22"}, {"вручную (←/→ выбрать)", ""},
 		{"root", currentUser()}, {"необязательно", ""}, {"~/.ssh/id_ed25519 (пусто = авто)", ""}, {"например, Production", ""},
@@ -1439,6 +1521,46 @@ func (m *Model) resetForm() {
 	m.inputs[hostPasswordInput].EchoCharacter = '•'
 	m.formFocus = 0
 	m.setFormFocus(0)
+}
+
+func (m *Model) beginSessionEdit() {
+	if m.selected < 0 || m.selected >= len(m.config.Sessions) {
+		return
+	}
+	index := m.selected
+	profile := m.config.Sessions[index]
+	m.resetForm()
+	m.formSessionIndex = index
+	m.formSessionName = profile.Name
+	values := []string{
+		profile.Name,
+		profile.Host,
+		strconv.Itoa(profile.Port),
+		profile.CredentialProfile,
+		profile.User,
+		profile.Password,
+		profile.KeyPath,
+		profile.Group,
+	}
+	for inputIndex, value := range values {
+		m.inputs[inputIndex].SetValue(value)
+	}
+	m.page, m.status = pageForm, ""
+}
+
+func (m *Model) editedSessionIndex() int {
+	if m.formSessionName == "" {
+		return -1
+	}
+	if m.formSessionIndex >= 0 && m.formSessionIndex < len(m.config.Sessions) && m.config.Sessions[m.formSessionIndex].Name == m.formSessionName {
+		return m.formSessionIndex
+	}
+	for index, session := range m.config.Sessions {
+		if session.Name == m.formSessionName {
+			return index
+		}
+	}
+	return -1
 }
 
 func (m *Model) setFormFocus(index int) {
@@ -1506,6 +1628,14 @@ func (m *Model) cycleFormCredential(direction int) {
 }
 
 func (m *Model) upsert(profile config.Session) {
+	if m.formSessionIndex >= 0 && m.formSessionIndex < len(m.config.Sessions) {
+		current := m.config.Sessions[m.formSessionIndex]
+		profile.PortForwards = append([]config.PortForward(nil), current.PortForwards...)
+		profile.ConnectionCount = current.ConnectionCount
+		m.config.Sessions[m.formSessionIndex] = profile
+		m.selected = m.formSessionIndex
+		return
+	}
 	for i := range m.config.Sessions {
 		if m.config.Sessions[i].Name == profile.Name {
 			if profile.PortForwards == nil {
@@ -1959,7 +2089,8 @@ func (m *Model) captureTab() *tabState {
 		id: m.tabID, page: m.page, status: m.status, selected: m.selected, confirm: m.confirm,
 		groupInput: m.groupInput, groupCursor: m.groupCursor,
 		profileManager: m.profileManager, importWizard: m.importWizard,
-		inputs: m.inputs, formFocus: m.formFocus, testing: m.testing, connecting: m.connecting,
+		inputs: m.inputs, formFocus: m.formFocus, formSessionIndex: m.formSessionIndex, formSessionName: m.formSessionName,
+		testing: m.testing, connecting: m.connecting,
 		profile: m.profile, conn: m.conn, term: m.term,
 		selection: m.selection, clipboardPaste: m.clipboardPaste, rightPasteDown: m.rightPasteDown,
 		filesFocused: m.filesFocused, sftpHidden: m.sftpHidden, root: m.root, visible: m.visible,
@@ -1988,7 +2119,9 @@ func (m *Model) restoreTab(index int) {
 	m.selected, m.confirm = state.selected, state.confirm
 	m.groupInput, m.groupCursor = state.groupInput, state.groupCursor
 	m.profileManager, m.importWizard = state.profileManager, state.importWizard
-	m.inputs, m.formFocus, m.testing, m.connecting = state.inputs, state.formFocus, state.testing, state.connecting
+	m.inputs, m.formFocus, m.formSessionIndex = state.inputs, state.formFocus, state.formSessionIndex
+	m.formSessionName = state.formSessionName
+	m.testing, m.connecting = state.testing, state.connecting
 	m.profile, m.conn, m.term = state.profile, state.conn, state.term
 	m.selection, m.clipboardPaste, m.rightPasteDown = state.selection, state.clipboardPaste, state.rightPasteDown
 	m.filesFocused, m.sftpHidden = state.filesFocused, state.sftpHidden

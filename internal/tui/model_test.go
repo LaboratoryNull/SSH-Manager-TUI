@@ -546,6 +546,101 @@ func TestSessionHintDescriptionIsClickable(t *testing.T) {
 	}
 }
 
+func TestConnectionCountIsNotRenderedInSessionList(t *testing.T) {
+	m := &Model{
+		width: 100, height: 30, page: pageSessions,
+		config: config.Config{Sessions: []config.Session{{
+			Name: "prod", Host: "host", Port: 22, User: "root", ConnectionCount: 37,
+		}}},
+	}
+	plain := ansi.Strip(m.sessionsView())
+	if strings.Contains(plain, "×37") {
+		t.Fatalf("connection count is visible in session list: %q", plain)
+	}
+}
+
+func TestEditSessionHintIsClickable(t *testing.T) {
+	m := &Model{
+		width: 100, height: 30, page: pageSessions,
+		config: config.Config{Sessions: []config.Session{{
+			Name: "prod", Host: "host", Port: 22, User: "root",
+		}}},
+	}
+	m.resetForm()
+	foundX, foundY := -1, -1
+	for y := 1; y < m.height && foundX < 0; y++ {
+		for x := 0; x < m.width; x++ {
+			if m.clickedHint(x, y) == "e" {
+				foundX, foundY = x, y
+				break
+			}
+		}
+	}
+	if foundX < 0 {
+		t.Fatal("edit-session hint has no mouse hit target")
+	}
+	_, _ = m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: foundX, Y: foundY, Button: tea.MouseLeft}))
+	if m.page != pageForm || m.formSessionName != "prod" {
+		t.Fatalf("clicked edit hint: page=%v original=%q", m.page, m.formSessionName)
+	}
+}
+
+func TestExistingHostCanBeEditedWithoutConnecting(t *testing.T) {
+	store := config.NewStoreAt(filepath.Join(t.TempDir(), "config.json"))
+	forward := config.PortForward{
+		Name: "postgres", Type: config.ForwardLocal, BindHost: "127.0.0.1", BindPort: 5433,
+		TargetHost: "database", TargetPort: 5432,
+	}
+	original := config.Session{
+		Name: "prod", Host: "old.example", Port: 22, User: "root", Group: "Production",
+		ConnectionCount: 12, PortForwards: []config.PortForward{forward},
+	}
+	prefix := config.Session{Name: "personal", Host: "home.example", Port: 22, User: "me"}
+	m := &Model{
+		store: store, width: 100, height: 30, page: pageSessions, selected: 1,
+		config: config.Config{Sessions: []config.Session{prefix, original}},
+	}
+	m.resetForm()
+
+	_, cmd := m.handleSessionKey(tea.KeyPressMsg(tea.Key{Code: 'e', Text: "e"}))
+	if cmd != nil || m.page != pageForm || m.formSessionIndex != 1 {
+		t.Fatalf("edit form state: cmd=%v page=%v index=%d", cmd != nil, m.page, m.formSessionIndex)
+	}
+	if got := m.inputs[hostAddressInput].Value(); got != original.Host {
+		t.Fatalf("prefilled host = %q, want %q", got, original.Host)
+	}
+	if plain := ansi.Strip(m.formView()); !strings.Contains(plain, "Редактирование хоста") || strings.Contains(plain, "Сохранить и подключить") {
+		t.Fatalf("unexpected edit form: %q", plain)
+	}
+
+	m.inputs[hostNameInput].SetValue("production")
+	m.inputs[hostAddressInput].SetValue("new.example")
+	m.inputs[hostPortInput].SetValue("2222")
+	// The shared session list can change in another tab while this form is open.
+	// Editing follows the original host identity instead of a now-stale slice index.
+	m.config.Sessions = m.config.Sessions[1:]
+	m.setFormFocus(len(m.inputs))
+	_, cmd = m.handleFormKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd != nil || m.connecting || m.page != pageSessions || m.status != "Хост обновлён" {
+		t.Fatalf("edit result: cmd=%v connecting=%v page=%v status=%q", cmd != nil, m.connecting, m.page, m.status)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Sessions) != 1 {
+		t.Fatalf("saved sessions = %d, want 1", len(loaded.Sessions))
+	}
+	got := loaded.Sessions[0]
+	if got.Name != "production" || got.Host != "new.example" || got.Port != 2222 {
+		t.Fatalf("edited session = %#v", got)
+	}
+	if got.ConnectionCount != original.ConnectionCount || !reflect.DeepEqual(got.PortForwards, original.PortForwards) {
+		t.Fatalf("editing lost internal session data: %#v", got)
+	}
+}
+
 func TestQOnHostPickerClosesOnlyCurrentTab(t *testing.T) {
 	m := &Model{width: 80, height: 24, tabID: 1, nextTabID: 1, page: pageSessions, sftpHidden: true}
 	m.resetForm()

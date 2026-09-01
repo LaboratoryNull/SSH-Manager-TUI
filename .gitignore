@@ -1,4 +1,7 @@
+/dist/
+/sshm
 /ssh-manager
 *.log
 *.test
+*.iml
 .idea/

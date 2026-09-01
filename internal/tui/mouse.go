@@ -19,7 +19,7 @@ var clickableHintLabels = []string{
 	"p/←/→",
 	"^Space", "Enter", "Space", "Backspace", "↑/↓", "←/→", "y/д",
 	"shift+tab", "Tab", "Esc", "F5", "^T", "^W", "^B", "^D", "^U", "^⇧C",
-	"^X", "d/Del", "Del", "n", "c", "m", "e", "d", "g", "q", "s", "u", "p", "i", "a", "f", "/",
+	"^X", "d/Del", "Del", "n", "c", "m", "e", "d", "g", "q", "s", "u", "p", "i", "t", "a", "f", "/",
 }
 
 func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
@@ -319,7 +319,7 @@ func (m *Model) activateHint(label string) (tea.Model, tea.Cmd) {
 			press = key('y', 0, "y")
 		case "n/e/d":
 			press = key('n', 0, "n")
-		case "n", "c", "m", "e", "d", "g", "q", "s", "u", "p", "i", "a", "f", "/":
+		case "n", "c", "m", "e", "d", "g", "q", "s", "u", "p", "i", "t", "a", "f", "/":
 			r := []rune(label)[0]
 			press = key(r, 0, string(r))
 		default:

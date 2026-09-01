@@ -599,7 +599,7 @@ func (m *Model) forwardEditorLines(editor *forwardEditor, width int) []string {
 func controlStyle(value string, focused bool) string {
 	style := lipgloss.NewStyle().Padding(0, 1).Foreground(muted).Background(surface)
 	if focused {
-		style = style.Foreground(lipgloss.Color("#11111B")).Background(accent).Bold(true)
+		style = style.Foreground(contrastText).Background(accent).Bold(true)
 	}
 	return style.Render(value)
 }

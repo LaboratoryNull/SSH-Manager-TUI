@@ -122,6 +122,7 @@ func (s Session) Validate() error {
 type Config struct {
 	Sessions     []Session     `json:"sessions"`
 	UserProfiles []UserProfile `json:"user_profiles,omitempty"`
+	Theme        string        `json:"theme,omitempty"`
 }
 
 func (c Config) UserProfile(name string) (UserProfile, bool) {
