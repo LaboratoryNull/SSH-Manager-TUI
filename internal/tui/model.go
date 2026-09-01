@@ -82,16 +82,20 @@ type tabState struct {
 	term           *terminalScreen
 	selection      *terminalSelection
 	clipboardPaste bool
+	rightPasteDown bool
 
-	filesFocused  bool
-	sftpHidden    bool
-	root          *fileNode
-	visible       []*fileNode
-	fileCursor    int
-	fileOffset    int
-	picker        *localPicker
-	escapePending bool
-	escapeID      uint64
+	filesFocused    bool
+	sftpHidden      bool
+	root            *fileNode
+	visible         []*fileNode
+	fileCursor      int
+	fileOffset      int
+	picker          *localPicker
+	sftpDialog      *sftpActionDialog
+	sftpBusy        bool
+	sftpOperationID uint64
+	escapePending   bool
+	escapeID        uint64
 
 	transferring         bool
 	transferCh           <-chan transferProgressMsg
@@ -100,6 +104,9 @@ type tabState struct {
 	transferPath         string
 	transferErr          error
 	transferUpload       bool
+	transferStarted      time.Time
+	transferLastDone     int64
+	transferSpeed        float64
 	transferCancel       context.CancelFunc
 	transferRemoteTarget *fileNode
 	forwardModal         *forwardModal
@@ -108,23 +115,24 @@ type tabState struct {
 }
 
 type Model struct {
-	store          *config.Store
-	config         config.Config
-	tabs           []*tabState
-	activeTab      int
-	nextTabID      uint64
-	nextForwardID  uint64
-	tabID          uint64
-	page           page
-	width          int
-	height         int
-	status         string
-	selected       int
-	confirm        bool
-	groupInput     *textinput.Model
-	groupCursor    int
-	profileManager *profileManager
-	importWizard   *importWizard
+	store               *config.Store
+	config              config.Config
+	tabs                []*tabState
+	activeTab           int
+	nextTabID           uint64
+	nextForwardID       uint64
+	nextSFTPOperationID uint64
+	tabID               uint64
+	page                page
+	width               int
+	height              int
+	status              string
+	selected            int
+	confirm             bool
+	groupInput          *textinput.Model
+	groupCursor         int
+	profileManager      *profileManager
+	importWizard        *importWizard
 
 	inputs     []textinput.Model
 	formFocus  int
@@ -136,16 +144,20 @@ type Model struct {
 	term           *terminalScreen
 	selection      *terminalSelection
 	clipboardPaste bool
+	rightPasteDown bool
 
-	filesFocused  bool
-	sftpHidden    bool
-	root          *fileNode
-	visible       []*fileNode
-	fileCursor    int
-	fileOffset    int
-	picker        *localPicker
-	escapePending bool
-	escapeID      uint64
+	filesFocused    bool
+	sftpHidden      bool
+	root            *fileNode
+	visible         []*fileNode
+	fileCursor      int
+	fileOffset      int
+	picker          *localPicker
+	sftpDialog      *sftpActionDialog
+	sftpBusy        bool
+	sftpOperationID uint64
+	escapePending   bool
+	escapeID        uint64
 
 	transferring         bool
 	transferCh           <-chan transferProgressMsg
@@ -154,6 +166,9 @@ type Model struct {
 	transferPath         string
 	transferErr          error
 	transferUpload       bool
+	transferStarted      time.Time
+	transferLastDone     int64
+	transferSpeed        float64
 	transferCancel       context.CancelFunc
 	transferRemoteTarget *fileNode
 	forwardModal         *forwardModal
@@ -328,15 +343,31 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.transferDone, m.transferTotal, m.transferPath, m.transferErr = msg.done, msg.total, msg.path, msg.err
 		m.transferUpload = msg.uploading
+		if msg.done > 0 {
+			now := time.Now()
+			if !m.transferStarted.IsZero() && msg.done >= m.transferLastDone {
+				seconds := now.Sub(m.transferStarted).Seconds()
+				if seconds > 0 {
+					instant := float64(msg.done-m.transferLastDone) / seconds
+					if m.transferSpeed == 0 {
+						m.transferSpeed = instant
+					} else {
+						m.transferSpeed = m.transferSpeed*0.7 + instant*0.3
+					}
+				}
+			}
+			m.transferStarted, m.transferLastDone = now, msg.done
+		}
+		if !msg.final {
+			operation := "Скачивание"
+			if msg.uploading {
+				operation = "Загрузка"
+			}
+			m.status = fmt.Sprintf("%s %s • %s", operation, compactTransferName(msg.path), formatTransferSpeed(m.transferSpeed))
+		}
 		if msg.final {
-			m.transferring = false
-			m.transferCh = nil
-			m.transferCancel = nil
 			refreshTarget := m.transferRemoteTarget
-			m.transferRemoteTarget = nil
 			if errors.Is(msg.err, context.Canceled) {
-				m.transferErr = nil
-				m.transferPath = ""
 				m.status = "Передача файлов отменена"
 			} else if msg.err != nil {
 				operation := "скачивания"
@@ -349,6 +380,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = "Скачано: " + msg.path
 			}
+			m.clearTransferProgress()
 			if msg.uploading && refreshTarget != nil && treeContains(m.root, refreshTarget) {
 				refreshTarget.Loaded, refreshTarget.Loading, refreshTarget.Expanded = false, true, true
 				return m, loadDir(m.conn.SFTP, refreshTarget)
@@ -356,12 +388,18 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, waitTransfer(m.transferCh)
+	case sftpActionDoneMsg:
+		return m.handleSFTPActionDone(msg)
 	case forwardStartedMsg:
 		return m.handleForwardStarted(msg)
 	case forwardErrorMsg:
 		return m.handleForwardError(msg)
 	case historyLoadedMsg:
 		return m.handleHistoryLoaded(msg)
+	case clipboardWriteResultMsg:
+		return m.handleClipboardWriteResult(msg)
+	case clipboardReadResultMsg:
+		return m.handleClipboardReadResult(msg)
 	case tea.ClipboardMsg:
 		m.clipboardPaste = false
 		if m.page == pageConnected && !m.filesFocused {
@@ -379,6 +417,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	case tea.PasteMsg:
 		m.clipboardPaste = false
+		if m.sftpDialog != nil && m.sftpDialog.action != sftpActionDelete {
+			var cmd tea.Cmd
+			m.sftpDialog.input, cmd = m.sftpDialog.input.Update(msg)
+			m.sftpDialog.status = ""
+			return m, cmd
+		}
 		if m.page == pageConnected {
 			return m.handleConnectedPaste(msg.Content)
 		}
@@ -388,6 +432,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouseMotion(msg)
 	case tea.MouseReleaseMsg:
 		return m.handleMouseRelease(msg)
+	}
+	if m.sftpDialog != nil && m.sftpDialog.action != sftpActionDelete {
+		var cmd tea.Cmd
+		m.sftpDialog.input, cmd = m.sftpDialog.input.Update(message)
+		return m, cmd
 	}
 
 	if m.groupInput != nil {
@@ -643,6 +692,9 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.forwardModal != nil {
 		return m.handleForwardKey(key)
 	}
+	if m.sftpDialog != nil {
+		return m.handleSFTPActionKey(key)
+	}
 	if m.picker != nil {
 		return m.handlePickerKey(key)
 	}
@@ -670,11 +722,10 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "Текст видимой области терминала скопирован"
 		}
-		return m, tea.SetClipboard(text)
+		return m, m.beginClipboardCopy(text)
 	}
-	if matchesPlatformShortcut(key, 'v', true) && !m.filesFocused {
-		m.clipboardPaste = true
-		return m, func() tea.Msg { return tea.ReadClipboard() }
+	if s == "shift+insert" && !m.filesFocused {
+		return m, m.requestClipboardPaste()
 	}
 	if m.escapePending {
 		m.escapePending = false
@@ -727,6 +778,14 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, m.openRemoteDirectory(path.Dir(m.root.Path))
 		case "r", "f5":
 			return m, m.reloadSelectedDirectory()
+		case "delete", "d":
+			return m, m.openSFTPAction(sftpActionDelete)
+		case "n":
+			return m, m.openSFTPAction(sftpActionMkdir)
+		case "c":
+			return m, m.openSFTPAction(sftpActionCopy)
+		case "m":
+			return m, m.openSFTPAction(sftpActionMove)
 		case "/":
 			return m, m.openRemoteDirectory("/")
 		case "home":
@@ -749,20 +808,16 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleConnectedPaste(content string) (tea.Model, tea.Cmd) {
-	if m.forwardModal != nil || m.picker != nil || m.filesFocused || m.conn == nil {
+	if m.forwardModal != nil || m.sftpDialog != nil || m.picker != nil || m.conn == nil {
 		return m, nil
 	}
 	if localPaths, ok := droppedLocalPaths(content); ok {
 		m.selection = nil
-		remoteDirectory := m.conn.Home
-		if m.term != nil && m.term.CurrentDirectory() != "" {
-			remoteDirectory = m.term.CurrentDirectory()
-		}
-		target := findFileNode(m.root, remoteDirectory)
-		if target == nil {
-			target = &fileNode{Name: path.Base(remoteDirectory), Path: remoteDirectory, Dir: true}
-		}
+		target := m.dropUploadTarget()
 		return m, m.startUpload(localPaths, target)
+	}
+	if m.filesFocused {
+		return m, nil
 	}
 	data := []byte(content)
 	if m.term != nil {
@@ -773,6 +828,27 @@ func (m *Model) handleConnectedPaste(content string) (tea.Model, tea.Cmd) {
 	}
 	m.selection = nil
 	return m, nil
+}
+
+func (m *Model) dropUploadTarget() *fileNode {
+	if m.filesFocused && len(m.visible) > 0 {
+		index := clamp(m.fileCursor, 0, len(m.visible)-1)
+		target := m.visible[index]
+		if !target.Dir {
+			target = findParentFileNode(m.root, target)
+		}
+		if target != nil && target.Dir {
+			return target
+		}
+	}
+	remoteDirectory := m.conn.Home
+	if m.term != nil && m.term.CurrentDirectory() != "" {
+		remoteDirectory = m.term.CurrentDirectory()
+	}
+	if target := findFileNode(m.root, remoteDirectory); target != nil {
+		return target
+	}
+	return &fileNode{Name: path.Base(remoteDirectory), Path: remoteDirectory, Dir: true}
 }
 
 func (m *Model) handlePickerKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -868,6 +944,8 @@ func (m *Model) viewContent() string {
 	case pageConnected:
 		if m.forwardModal != nil {
 			content = m.forwardView()
+		} else if m.sftpDialog != nil {
+			content = m.sftpActionView()
 		} else if m.picker != nil {
 			content = m.pickerView()
 		} else {
@@ -950,15 +1028,15 @@ func (m *Model) connectedHints(width int) string {
 	return hintsView(width,
 		[][2]string{
 			{keys.newTab, "новая вкладка"}, {keys.closeTab, "закрыть"}, {keys.tabs, "вкладки"},
-			{keys.numberedTabs, "по номеру"}, {keys.toggleSFTP, "SFTP"}, {keys.copy, "копировать"}, {keys.paste, "вставить"}, {keys.ports, "порты"}, {"Esc q", "отключить"},
+			{keys.numberedTabs, "по номеру"}, {keys.toggleSFTP, "SFTP"}, {"Shift+Insert/ПКМ", "вставить"}, {keys.ports, "порты"}, {"Esc q", "отключить"},
 		},
 		[][2]string{
-			{compact.copy, "копия"}, {compact.paste, "вставка"}, {compact.toggleSFTP, "SFTP"},
+			{"⇧Ins/ПКМ", "вставка"}, {compact.toggleSFTP, "SFTP"},
 			{compact.ports, "порты"}, {"Esc q", "выход"},
 		},
-		[][2]string{{compact.copy, "копия"}, {compact.paste, "вставка"}, {compact.toggleSFTP, "SFTP"}, {"Esc q", "выход"}},
-		[][2]string{{compact.copy, "копия"}, {compact.paste, "вставка"}, {compact.toggleSFTP, "SFTP"}},
-		[][2]string{{compact.copy, "копия"}, {compact.paste, "вставка"}},
+		[][2]string{{"⇧Ins/ПКМ", "вставка"}, {compact.toggleSFTP, "SFTP"}, {"Esc q", "выход"}},
+		[][2]string{{"⇧Ins/ПКМ", "вставка"}, {compact.toggleSFTP, "SFTP"}},
+		[][2]string{{"⇧Ins", "вставка"}},
 	)
 }
 
@@ -1118,10 +1196,7 @@ func (m *Model) connectedView() string {
 
 func (m *Model) filesView(width, height int) string {
 	header := lipgloss.NewStyle().Bold(true).Foreground(accentAlt).Render(" ◆ SFTP ")
-	footerLines := 1
-	if m.transferring || m.transferPath != "" {
-		footerLines = 2
-	}
+	footerLines := 3
 	listH := max(1, height-1-footerLines)
 	m.ensureFileVisibleHeight(listH)
 	lines := []string{header}
@@ -1152,7 +1227,7 @@ func (m *Model) filesView(width, height int) string {
 	for len(lines) < height-footerLines {
 		lines = append(lines, "")
 	}
-	if m.transferring || m.transferPath != "" {
+	if m.transferring {
 		lines = append(lines, m.progressView(width))
 	}
 	var help string
@@ -1164,11 +1239,20 @@ func (m *Model) filesView(width, height int) string {
 			[][2]string{{compact.cancel, "отмена"}},
 		)
 	} else {
-		help = hintsView(width,
+		transferHelp := hintsView(width,
 			[][2]string{{keys.focus, "фокус"}, {keys.download, "скачать"}, {keys.upload, "загрузить"}, {"F5", "обновить"}, {"/", "корень"}},
 			[][2]string{{compact.download, "↓"}, {compact.upload, "↑"}, {"F5", "↻"}},
 			[][2]string{{"F5", "обновить"}},
 		)
+		createCopyHelp := hintsView(width,
+			[][2]string{{"n", "каталог"}, {"c", "копия"}},
+			[][2]string{{"n", "+"}, {"c", "коп"}},
+		)
+		moveDeleteHelp := hintsView(width,
+			[][2]string{{"m", "переместить"}, {"d/Del", "удалить"}},
+			[][2]string{{"m", "пер"}, {"d/Del", "×"}},
+		)
+		help = transferHelp + "\n" + createCopyHelp + "\n" + moveDeleteHelp
 	}
 	lines = append(lines, help)
 	return strings.Join(lines, "\n")
@@ -1185,15 +1269,49 @@ func (m *Model) progressView(width int) string {
 		ratio = 1
 	}
 	ratio = min(1.0, max(0.0, ratio))
-	barW := max(3, width-8)
-	filled := min(barW, int(ratio*float64(barW)))
-	bar := lipgloss.NewStyle().Foreground(accent).Render(strings.Repeat("█", filled)) +
-		lipgloss.NewStyle().Foreground(borderMuted).Render(strings.Repeat("░", barW-filled))
 	direction := "↓"
 	if m.transferUpload {
 		direction = "↑"
 	}
-	return subtitleStyle.Copy().Bold(true).Render(direction) + bar + warningColorStyle(fmt.Sprintf(" %3.0f%%", ratio*100))
+	nameLine := truncate(direction+" "+compactTransferName(m.transferPath), width)
+	detail := fmt.Sprintf("%3.0f%% %s", ratio*100, formatTransferSpeed(m.transferSpeed))
+	barW := width - lipgloss.Width(detail) - 1
+	if barW < 1 {
+		detail = fmt.Sprintf("%3.0f%%", ratio*100)
+		barW = max(1, width-lipgloss.Width(detail)-1)
+	}
+	filled := min(barW, int(ratio*float64(barW)))
+	bar := lipgloss.NewStyle().Foreground(accent).Render(strings.Repeat("█", filled)) +
+		lipgloss.NewStyle().Foreground(borderMuted).Render(strings.Repeat("░", barW-filled))
+	return subtitleStyle.Copy().Bold(true).Render(nameLine) + "\n" + bar + " " + warningColorStyle(detail)
+}
+
+func compactTransferName(value string) string {
+	base := path.Base(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"))
+	if base == "." || base == "/" || base == "" {
+		base = strings.TrimSpace(value)
+	}
+	runes := []rune(base)
+	if len(runes) <= 15 {
+		return base
+	}
+	return string(runes[:7]) + "..." + string(runes[len(runes)-5:])
+}
+
+func formatTransferSpeed(bytesPerSecond float64) string {
+	if bytesPerSecond < 0 {
+		bytesPerSecond = 0
+	}
+	units := []string{"B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s"}
+	unit := 0
+	for bytesPerSecond >= 1024 && unit < len(units)-1 {
+		bytesPerSecond /= 1024
+		unit++
+	}
+	if unit == 0 || bytesPerSecond >= 100 {
+		return fmt.Sprintf("%.0f%s", bytesPerSecond, units[unit])
+	}
+	return fmt.Sprintf("%.1f%s", bytesPerSecond, units[unit])
 }
 
 func (m *Model) pickerView() string {
@@ -1706,21 +1824,32 @@ func (m *Model) cancelTransfer() {
 	m.transferCancel()
 }
 
+func (m *Model) clearTransferProgress() {
+	m.transferring, m.transferCh, m.transferCancel = false, nil, nil
+	m.transferDone, m.transferTotal, m.transferPath, m.transferErr = 0, 0, "", nil
+	m.transferUpload, m.transferRemoteTarget = false, nil
+	m.transferStarted, m.transferLastDone, m.transferSpeed = time.Time{}, 0, 0
+}
+
 func (m *Model) startSelectedDownload(destination string, node *fileNode) tea.Cmd {
-	if m.transferring || node == nil || m.conn == nil {
+	if m.transferring || m.sftpBusy || node == nil || m.conn == nil {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	updates := make(chan transferProgressMsg, 16)
 	m.transferring, m.transferCh, m.transferCancel = true, updates, cancel
 	m.transferDone, m.transferTotal, m.transferPath, m.transferErr = 0, 0, node.Path, nil
-	m.transferUpload = false
+	m.transferUpload, m.transferStarted, m.transferLastDone, m.transferSpeed = false, time.Time{}, 0, 0
 	m.status = "Подсчёт размера и скачивание " + node.Path
 	go startDownload(ctx, m.conn.SFTP, node, destination, updates)
 	return waitTransfer(updates)
 }
 
 func (m *Model) openDownloadPicker() tea.Cmd {
+	if m.sftpBusy {
+		m.status = "Дождитесь завершения текущей SFTP-операции"
+		return nil
+	}
 	if m.transferring {
 		m.status = "Дождитесь завершения текущей передачи"
 		return nil
@@ -1734,6 +1863,10 @@ func (m *Model) openDownloadPicker() tea.Cmd {
 }
 
 func (m *Model) openUploadPicker() tea.Cmd {
+	if m.sftpBusy {
+		m.status = "Дождитесь завершения текущей SFTP-операции"
+		return nil
+	}
 	if m.transferring {
 		m.status = "Дождитесь завершения текущей передачи"
 		return nil
@@ -1776,14 +1909,15 @@ func (m *Model) chooseUploadSources() tea.Cmd {
 }
 
 func (m *Model) startUpload(localSources []string, target *fileNode) tea.Cmd {
-	if m.transferring || target == nil || !target.Dir || m.conn == nil {
+	if m.transferring || m.sftpBusy || len(localSources) == 0 || target == nil || !target.Dir || m.conn == nil {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	updates := make(chan transferProgressMsg, 16)
 	m.transferring, m.transferCh, m.transferCancel = true, updates, cancel
-	m.transferDone, m.transferTotal, m.transferPath, m.transferErr = 0, 0, strings.Join(localSources, ", "), nil
+	m.transferDone, m.transferTotal, m.transferPath, m.transferErr = 0, 0, localSources[0], nil
 	m.transferUpload, m.transferRemoteTarget = true, target
+	m.transferStarted, m.transferLastDone, m.transferSpeed = time.Time{}, 0, 0
 	m.status = fmt.Sprintf("Подсчёт размера и загрузка %d объект(ов) в %s", len(localSources), target.Path)
 	go startUploads(ctx, m.conn.SFTP, localSources, target.Path, updates)
 	return waitTransfer(updates)
@@ -1796,13 +1930,16 @@ func (m *Model) captureTab() *tabState {
 		profileManager: m.profileManager, importWizard: m.importWizard,
 		inputs: m.inputs, formFocus: m.formFocus, testing: m.testing, connecting: m.connecting,
 		profile: m.profile, conn: m.conn, term: m.term,
-		selection: m.selection, clipboardPaste: m.clipboardPaste,
+		selection: m.selection, clipboardPaste: m.clipboardPaste, rightPasteDown: m.rightPasteDown,
 		filesFocused: m.filesFocused, sftpHidden: m.sftpHidden, root: m.root, visible: m.visible,
 		fileCursor: m.fileCursor, fileOffset: m.fileOffset, picker: m.picker,
+		sftpDialog: m.sftpDialog, sftpBusy: m.sftpBusy, sftpOperationID: m.sftpOperationID,
 		escapePending: m.escapePending, escapeID: m.escapeID,
 		transferring: m.transferring, transferCh: m.transferCh, transferDone: m.transferDone,
 		transferTotal: m.transferTotal, transferPath: m.transferPath, transferErr: m.transferErr,
-		transferUpload: m.transferUpload, transferCancel: m.transferCancel,
+		transferUpload: m.transferUpload, transferStarted: m.transferStarted,
+		transferLastDone: m.transferLastDone, transferSpeed: m.transferSpeed,
+		transferCancel:       m.transferCancel,
 		transferRemoteTarget: m.transferRemoteTarget, forwardModal: m.forwardModal, forwards: m.forwards,
 		hostKeyPrompt: m.hostKeyPrompt,
 	}
@@ -1822,13 +1959,16 @@ func (m *Model) restoreTab(index int) {
 	m.profileManager, m.importWizard = state.profileManager, state.importWizard
 	m.inputs, m.formFocus, m.testing, m.connecting = state.inputs, state.formFocus, state.testing, state.connecting
 	m.profile, m.conn, m.term = state.profile, state.conn, state.term
-	m.selection, m.clipboardPaste = state.selection, state.clipboardPaste
+	m.selection, m.clipboardPaste, m.rightPasteDown = state.selection, state.clipboardPaste, state.rightPasteDown
 	m.filesFocused, m.sftpHidden = state.filesFocused, state.sftpHidden
 	m.root, m.visible, m.fileCursor, m.fileOffset = state.root, state.visible, state.fileCursor, state.fileOffset
-	m.picker, m.escapePending, m.escapeID = state.picker, state.escapePending, state.escapeID
+	m.picker, m.sftpDialog = state.picker, state.sftpDialog
+	m.sftpBusy, m.sftpOperationID = state.sftpBusy, state.sftpOperationID
+	m.escapePending, m.escapeID = state.escapePending, state.escapeID
 	m.transferring, m.transferCh = state.transferring, state.transferCh
 	m.transferDone, m.transferTotal, m.transferPath = state.transferDone, state.transferTotal, state.transferPath
 	m.transferErr, m.transferUpload, m.transferCancel = state.transferErr, state.transferUpload, state.transferCancel
+	m.transferStarted, m.transferLastDone, m.transferSpeed = state.transferStarted, state.transferLastDone, state.transferSpeed
 	m.transferRemoteTarget = state.transferRemoteTarget
 	m.forwardModal, m.forwards = state.forwardModal, state.forwards
 	m.hostKeyPrompt = state.hostKeyPrompt
@@ -1844,13 +1984,15 @@ func (m *Model) resetTab(id uint64) {
 	}
 	m.testing, m.connecting = false, false
 	m.profile, m.conn, m.term = config.Session{}, nil, nil
-	m.selection, m.clipboardPaste = nil, false
+	m.selection, m.clipboardPaste, m.rightPasteDown = nil, false, false
 	m.filesFocused, m.sftpHidden = false, true
 	m.root, m.visible, m.fileCursor, m.fileOffset = nil, nil, 0, 0
-	m.picker, m.escapePending, m.escapeID = nil, false, 0
+	m.picker, m.sftpDialog, m.sftpBusy, m.sftpOperationID = nil, nil, false, 0
+	m.escapePending, m.escapeID = false, 0
 	m.transferring, m.transferCh, m.transferCancel = false, nil, nil
 	m.transferDone, m.transferTotal, m.transferPath, m.transferErr = 0, 0, "", nil
 	m.transferUpload, m.transferRemoteTarget = false, nil
+	m.transferStarted, m.transferLastDone, m.transferSpeed = time.Time{}, 0, 0
 	m.forwardModal, m.forwards = nil, nil
 	m.hostKeyPrompt = nil
 	m.resetForm()
@@ -1965,11 +2107,17 @@ func (m *Model) messageTabIndex(message tea.Msg) (int, bool) {
 			}
 		}
 		return -1, true
+	case sftpActionDoneMsg:
+		return m.tabIndexByID(msg.tabID), true
 	case forwardStartedMsg:
 		return m.tabIndexByID(msg.tabID), true
 	case forwardErrorMsg:
 		return m.tabIndexByID(msg.tabID), true
 	case historyLoadedMsg:
+		return m.tabIndexByID(msg.tabID), true
+	case clipboardWriteResultMsg:
+		return m.tabIndexByID(msg.tabID), true
+	case clipboardReadResultMsg:
 		return m.tabIndexByID(msg.tabID), true
 	case tea.ClipboardMsg:
 		if m.clipboardPaste {
@@ -2004,9 +2152,10 @@ func (m *Model) disconnect(status string) {
 		m.conn.Close()
 	}
 	m.conn, m.root, m.visible, m.term = nil, nil, nil, nil
-	m.selection, m.clipboardPaste = nil, false
-	m.transferring, m.transferCh, m.transferCancel = false, nil, nil
-	m.picker, m.transferRemoteTarget, m.escapePending = nil, nil, false
+	m.selection, m.clipboardPaste, m.rightPasteDown = nil, false, false
+	m.clearTransferProgress()
+	m.picker, m.sftpDialog, m.sftpBusy, m.sftpOperationID = nil, nil, false, 0
+	m.escapePending = false
 	m.forwardModal, m.forwards = nil, nil
 	m.hostKeyPrompt = nil
 	m.page, m.status = pageSessions, status

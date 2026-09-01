@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"ssh-manager-tui/internal/config"
 	"ssh-manager-tui/internal/remote"
@@ -81,6 +82,84 @@ func TestCancelledTransferFinishesWithoutErrorStatus(t *testing.T) {
 	_, _ = m.Update(transferProgressMsg{source: updates, final: true, err: context.Canceled})
 	if m.transferring || m.transferPath != "" || m.transferErr != nil || m.status != "Передача файлов отменена" {
 		t.Fatalf("cancelled state: transferring=%v path=%q err=%v status=%q", m.transferring, m.transferPath, m.transferErr, m.status)
+	}
+}
+
+func TestSuccessfulTransferShowsMessageAndClearsProgress(t *testing.T) {
+	updates := make(chan transferProgressMsg)
+	m := &Model{
+		page: pageConnected, transferring: true, transferCh: updates,
+		transferDone: 50, transferTotal: 100, transferPath: "/tmp/report.txt", transferSpeed: 1024,
+	}
+	_, _ = m.Update(transferProgressMsg{
+		source: updates, final: true, done: 100, total: 100, path: "/tmp/report.txt",
+	})
+	if m.transferring || m.transferPath != "" || m.transferDone != 0 || m.transferTotal != 0 || m.transferSpeed != 0 {
+		t.Fatalf("completed progress was not cleared: %#v", m)
+	}
+	if m.status != "Скачано: /tmp/report.txt" {
+		t.Fatalf("completion status = %q", m.status)
+	}
+}
+
+func TestProgressShowsCompactNameSpeedAndPercentage(t *testing.T) {
+	m := &Model{
+		transferring: true, transferPath: "/tmp/verylongfilename.tar.gz",
+		transferDone: 50, transferTotal: 100, transferSpeed: 1.5 * 1024 * 1024,
+	}
+	plain := ansi.Strip(m.progressView(24))
+	for _, wanted := range []string{"verylon...ar.gz", "50%", "1.5MiB/s"} {
+		if !strings.Contains(plain, wanted) {
+			t.Fatalf("progress %q does not contain %q", plain, wanted)
+		}
+	}
+}
+
+func TestSFTPViewKeepsTwoLineProgressInsidePane(t *testing.T) {
+	root := &fileNode{Name: "/root", Path: "/root", Dir: true}
+	m := &Model{
+		width: 100, height: 30, root: root, visible: []*fileNode{root},
+		transferring: true, transferPath: "/tmp/verylongfilename.tar.gz",
+		transferDone: 50, transferTotal: 100, transferSpeed: 2 * 1024 * 1024,
+	}
+	view := m.filesView(18, 25)
+	if got := lipgloss.Height(view); got != 25 {
+		t.Fatalf("SFTP progress height = %d, want 25", got)
+	}
+	if got := lipgloss.Width(view); got > 18 {
+		t.Fatalf("SFTP progress width = %d, want <= 18", got)
+	}
+}
+
+func TestDropUploadTargetUsesSelectedSFTPDirectory(t *testing.T) {
+	root := &fileNode{Name: "home", Path: "/home/root", Dir: true}
+	directory := &fileNode{Name: "uploads", Path: "/home/root/uploads", Dir: true}
+	file := &fileNode{Name: "old.txt", Path: "/home/root/old.txt"}
+	root.Children = []*fileNode{directory, file}
+	m := &Model{
+		page: pageConnected, filesFocused: true, root: root,
+		visible: []*fileNode{root, directory, file}, fileCursor: 1,
+		conn: &remote.Connection{Home: "/home/root"},
+	}
+	if got := m.dropUploadTarget(); got != directory {
+		t.Fatalf("directory drop target = %#v", got)
+	}
+	m.fileCursor = 2
+	if got := m.dropUploadTarget(); got != root {
+		t.Fatalf("file drop target = %#v, want its parent", got)
+	}
+}
+
+func TestDropReleaseOverSFTPSelectsDirectoryUnderPointer(t *testing.T) {
+	root := &fileNode{Name: "home", Path: "/home/root", Dir: true}
+	directory := &fileNode{Name: "uploads", Path: "/home/root/uploads", Dir: true}
+	m := &Model{
+		width: 100, height: 30, page: pageConnected, root: root,
+		visible: []*fileNode{root, directory}, conn: &remote.Connection{Home: "/home/root"},
+	}
+	_, _ = m.handleMouseRelease(tea.MouseReleaseMsg(tea.Mouse{X: 5, Y: 4, Button: tea.MouseLeft}))
+	if !m.filesFocused || m.fileCursor != 1 || m.dropUploadTarget() != directory {
+		t.Fatalf("SFTP drop state: focused=%v cursor=%d target=%#v", m.filesFocused, m.fileCursor, m.dropUploadTarget())
 	}
 }
 
@@ -247,24 +326,58 @@ func TestMouseDragSelectsTerminalText(t *testing.T) {
 	m.term.Feed([]byte("hello\r\nworld"))
 	_, _ = m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: 2, Y: 3, Button: tea.MouseLeft}))
 	_, _ = m.handleMouseMotion(tea.MouseMotionMsg(tea.Mouse{X: 3, Y: 4, Button: tea.MouseLeft}))
-	_, _ = m.handleMouseRelease(tea.MouseReleaseMsg(tea.Mouse{X: 3, Y: 4, Button: tea.MouseLeft}))
+	_, copyCmd := m.handleMouseRelease(tea.MouseReleaseMsg(tea.Mouse{X: 3, Y: 4, Button: tea.MouseLeft}))
 	if m.selection == nil || m.selection.dragging {
 		t.Fatalf("selection state = %#v", m.selection)
 	}
 	if got := m.selection.text; got != "ello\nwor" {
 		t.Fatalf("selected text = %q", got)
 	}
-	_, copyCmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl | tea.ModShift}))
-	if copyCmd == nil || m.status != "Выделенный текст скопирован" {
+	if copyCmd == nil || m.status != "Копирование текста в системный буфер…" {
 		t.Fatalf("copy state: cmd=%v status=%q", copyCmd != nil, m.status)
+	}
+	_, _ = m.handleClipboardWriteResult(clipboardWriteResultMsg{tabID: m.tabID, text: m.selection.text})
+	if m.status != "Текст скопирован в системный буфер" {
+		t.Fatalf("copy result status = %q", m.status)
 	}
 }
 
-func TestPasteShortcutRequestsSystemClipboard(t *testing.T) {
+func TestShiftInsertRequestsSystemClipboard(t *testing.T) {
 	m := &Model{page: pageConnected, sftpHidden: true, term: newTerminalScreen(20, 4)}
-	_, cmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'v', Mod: tea.ModCtrl | tea.ModShift}))
+	_, cmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyInsert, Mod: tea.ModShift}))
 	if cmd == nil || !m.clipboardPaste {
 		t.Fatalf("paste request: cmd=%v pending=%v", cmd != nil, m.clipboardPaste)
+	}
+}
+
+func TestRightClickInTerminalRequestsSystemClipboard(t *testing.T) {
+	m := &Model{
+		width: 100, height: 30, page: pageConnected, sftpHidden: true,
+		filesFocused: true, term: newTerminalScreen(98, 25),
+	}
+	_, clickCmd := m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: 2, Y: 3, Button: tea.MouseRight}))
+	if clickCmd != nil || !m.rightPasteDown || m.filesFocused {
+		t.Fatalf("right press: cmd=%v down=%v filesFocused=%v", clickCmd != nil, m.rightPasteDown, m.filesFocused)
+	}
+	_, pasteCmd := m.handleMouseRelease(tea.MouseReleaseMsg(tea.Mouse{X: 2, Y: 3, Button: tea.MouseRight}))
+	if pasteCmd == nil || !m.clipboardPaste || m.rightPasteDown {
+		t.Fatalf("right release: cmd=%v pending=%v down=%v", pasteCmd != nil, m.clipboardPaste, m.rightPasteDown)
+	}
+}
+
+func TestRightReleaseWithoutPressRequestsSystemClipboard(t *testing.T) {
+	m := &Model{width: 100, height: 30, page: pageConnected, sftpHidden: true, term: newTerminalScreen(98, 25)}
+	_, cmd := m.handleMouseRelease(tea.MouseReleaseMsg(tea.Mouse{X: 2, Y: 3, Button: tea.MouseRight}))
+	if cmd == nil || !m.clipboardPaste {
+		t.Fatalf("release-only paste: cmd=%v pending=%v", cmd != nil, m.clipboardPaste)
+	}
+}
+
+func TestClipboardWriteFailureDoesNotClaimSuccess(t *testing.T) {
+	m := &Model{}
+	_, fallback := m.handleClipboardWriteResult(clipboardWriteResultMsg{text: "hello", err: errors.New("unavailable")})
+	if fallback == nil || strings.Contains(strings.ToLower(m.status), "скопирован в системный") {
+		t.Fatalf("fallback state: cmd=%v status=%q", fallback != nil, m.status)
 	}
 }
 
@@ -276,19 +389,112 @@ func TestSFTPHintIsClickable(t *testing.T) {
 		profile: config.Session{Name: "test", User: "root", Host: "host"}, term: newTerminalScreen(78, 25),
 	}
 	m.tabs = []*tabState{m.captureTab()}
-	x := -1
-	for candidate := 0; candidate < m.width; candidate++ {
-		if m.clickedHint(candidate, m.height-2) == "F5" {
-			x = candidate
+	x, y := -1, -1
+	for _, candidateY := range []int{m.height - 4, m.height - 3, m.height - 2} {
+		for candidateX := 0; candidateX < m.width; candidateX++ {
+			if m.clickedHint(candidateX, candidateY) == "F5" {
+				x, y = candidateX, candidateY
+				break
+			}
+		}
+		if x >= 0 {
 			break
 		}
 	}
 	if x < 0 {
 		t.Fatal("F5 hint has no mouse hit target")
 	}
-	_, cmd := m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: x, Y: m.height - 2, Button: tea.MouseLeft}))
+	_, cmd := m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: x, Y: y, Button: tea.MouseLeft}))
 	if cmd == nil || !root.Loading || root.Loaded {
 		t.Fatalf("clicked reload state: cmd=%v loading=%v loaded=%v", cmd != nil, root.Loading, root.Loaded)
+	}
+}
+
+func TestSFTPActionHotkeysOpenDialogs(t *testing.T) {
+	root := &fileNode{Name: "root", Path: "/root", Dir: true}
+	file := &fileNode{Name: "report.txt", Path: "/root/report.txt"}
+	root.Children = []*fileNode{file}
+	m := &Model{
+		width: 100, height: 30, page: pageConnected, filesFocused: true,
+		conn: &remote.Connection{}, root: root, visible: []*fileNode{root, file}, fileCursor: 1,
+	}
+	tests := []struct {
+		key    tea.Key
+		action sftpAction
+	}{
+		{tea.Key{Code: 'n', Text: "n"}, sftpActionMkdir},
+		{tea.Key{Code: 'c', Text: "c"}, sftpActionCopy},
+		{tea.Key{Code: 'm', Text: "m"}, sftpActionMove},
+		{tea.Key{Code: 'd', Text: "d"}, sftpActionDelete},
+		{tea.Key{Code: tea.KeyDelete}, sftpActionDelete},
+	}
+	for _, test := range tests {
+		m.sftpDialog = nil
+		_, _ = m.handleConnectedKey(tea.KeyPressMsg(test.key))
+		if m.sftpDialog == nil || m.sftpDialog.action != test.action {
+			t.Fatalf("key %q opened dialog %#v, want action %v", test.key.Keystroke(), m.sftpDialog, test.action)
+		}
+	}
+}
+
+func TestSFTPDeleteHintIsClickable(t *testing.T) {
+	root := &fileNode{Name: "root", Path: "/root", Dir: true, Expanded: true, Loaded: true}
+	file := &fileNode{Name: "report.txt", Path: "/root/report.txt"}
+	root.Children = []*fileNode{file}
+	m := &Model{
+		width: 100, height: 30, page: pageConnected, tabID: 1, sftpHidden: false,
+		filesFocused: true, conn: &remote.Connection{}, root: root, visible: []*fileNode{root, file}, fileCursor: 1,
+		profile: config.Session{Name: "test", User: "root", Host: "host"}, term: newTerminalScreen(78, 25),
+	}
+	m.tabs = []*tabState{m.captureTab()}
+	foundX, foundY := -1, -1
+	for y := m.height - 4; y <= m.height-2 && foundX < 0; y++ {
+		for x := 0; x < m.width; x++ {
+			if m.clickedHint(x, y) == "d/Del" {
+				foundX, foundY = x, y
+				break
+			}
+		}
+	}
+	if foundX < 0 {
+		t.Fatal("delete hint has no mouse hit target")
+	}
+	_, _ = m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: foundX, Y: foundY, Button: tea.MouseLeft}))
+	if m.sftpDialog == nil || m.sftpDialog.action != sftpActionDelete {
+		t.Fatalf("clicked delete hint opened %#v", m.sftpDialog)
+	}
+}
+
+func TestSFTPDestinationValidation(t *testing.T) {
+	if _, err := sftpDestinationPath("/opt/data", "/opt/data/archive", true); err == nil {
+		t.Fatal("copying a directory into its descendant was accepted")
+	}
+	if _, err := sftpDestinationPath("/opt/report.txt", "/opt", false); err == nil {
+		t.Fatal("copying a file onto itself was accepted")
+	}
+	if got, err := sftpDestinationPath("/opt/report.txt", "/tmp", false); err != nil || got != "/tmp/report.txt" {
+		t.Fatalf("destination = %q, err=%v", got, err)
+	}
+}
+
+func TestSFTPDeleteRequiresConfirmationAndProtectsTreeRoot(t *testing.T) {
+	root := &fileNode{Name: "root", Path: "/root", Dir: true}
+	file := &fileNode{Name: "report.txt", Path: "/root/report.txt"}
+	root.Children = []*fileNode{file}
+	m := &Model{
+		page: pageConnected, filesFocused: true, conn: &remote.Connection{},
+		root: root, visible: []*fileNode{root, file},
+	}
+	if cmd := m.openSFTPAction(sftpActionDelete); cmd != nil || m.sftpDialog != nil {
+		t.Fatal("tree root deletion was not rejected")
+	}
+	m.fileCursor = 1
+	if cmd := m.openSFTPAction(sftpActionDelete); cmd == nil || m.sftpDialog == nil {
+		t.Fatal("delete confirmation was not opened")
+	}
+	_, cmd := m.handleSFTPActionKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if cmd == nil || !m.sftpBusy || m.sftpDialog != nil {
+		t.Fatalf("confirmed deletion: cmd=%v busy=%v dialog=%#v", cmd != nil, m.sftpBusy, m.sftpDialog)
 	}
 }
 

@@ -544,3 +544,142 @@ func safeChildName(name string) (string, error) {
 	}
 	return name, nil
 }
+
+func removeRemoteTree(client *sftp.Client, remotePath string) error {
+	info, err := client.Lstat(remotePath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		entries, err := client.ReadDir(remotePath)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			name, err := safeChildName(entry.Name())
+			if err != nil {
+				return err
+			}
+			if err := removeRemoteTree(client, path.Join(remotePath, name)); err != nil {
+				return err
+			}
+		}
+		return client.RemoveDirectory(remotePath)
+	}
+	return client.Remove(remotePath)
+}
+
+func copyRemoteTree(client *sftp.Client, source, target string) error {
+	info, err := client.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		linkTarget, err := client.ReadLink(source)
+		if err != nil {
+			return err
+		}
+		return client.Symlink(linkTarget, target)
+	}
+	if info.IsDir() {
+		if err := client.Mkdir(target); err != nil {
+			return err
+		}
+		entries, err := client.ReadDir(source)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			name, err := safeChildName(entry.Name())
+			if err != nil {
+				return err
+			}
+			if err := copyRemoteTree(client, path.Join(source, name), path.Join(target, name)); err != nil {
+				return err
+			}
+		}
+		return client.Chmod(target, info.Mode().Perm())
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("unsupported remote file type: %s", source)
+	}
+	sourceFile, err := client.Open(source)
+	if err != nil {
+		return err
+	}
+	targetFile, err := client.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY)
+	if err != nil {
+		_ = sourceFile.Close()
+		return err
+	}
+	_, copyErr := io.Copy(targetFile, sourceFile)
+	targetCloseErr := targetFile.Close()
+	sourceCloseErr := sourceFile.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if targetCloseErr != nil {
+		return targetCloseErr
+	}
+	if sourceCloseErr != nil {
+		return sourceCloseErr
+	}
+	return client.Chmod(target, info.Mode().Perm())
+}
+
+func copyRemoteWithin(client *sftp.Client, source, target string) error {
+	if err := ensureRemotePathAvailable(client, target); err != nil {
+		return err
+	}
+	temporaryBase := path.Join(path.Dir(target), fmt.Sprintf(".ssh-manager-copy-part-%d", time.Now().UnixNano()))
+	temporary, err := availableRemotePath(client, temporaryBase)
+	if err != nil {
+		return err
+	}
+	if err := copyRemoteTree(client, source, temporary); err != nil {
+		_ = removeRemoteTree(client, temporary)
+		return err
+	}
+	if err := client.Rename(temporary, target); err != nil {
+		_ = removeRemoteTree(client, temporary)
+		return err
+	}
+	return nil
+}
+
+func moveRemoteWithin(client *sftp.Client, source, target string) error {
+	if err := client.Rename(source, target); err == nil {
+		return nil
+	} else {
+		renameErr := err
+		if err := copyRemoteWithin(client, source, target); err != nil {
+			return fmt.Errorf("rename failed (%v); copy fallback failed: %w", renameErr, err)
+		}
+		if err := removeRemoteTree(client, source); err != nil {
+			return fmt.Errorf("copied to %s, but could not remove source: %w", target, err)
+		}
+		return nil
+	}
+}
+
+func ensureRemoteDirectory(client *sftp.Client, directory string) error {
+	info, err := client.Lstat(directory)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", directory)
+	}
+	return nil
+}
+
+func ensureRemotePathAvailable(client *sftp.Client, target string) error {
+	_, err := client.Lstat(target)
+	if err == nil {
+		return fmt.Errorf("already exists: %s", target)
+	}
+	if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}

@@ -10,19 +10,30 @@ import (
 )
 
 var clickableHintLabels = []string{
-	"⌘Space", "⌘T", "⌘W", "⌘B", "⌘C", "⌘V", "⌘D", "⌘U", "⌘X", "⌘Q",
+	"Shift+Insert/ПКМ", "⇧Ins/ПКМ", "Shift+Insert", "⇧Ins",
+	"⌘Space", "⌘T", "⌘W", "⌘B", "⌘C", "⌘D", "⌘U", "⌘X", "⌘Q",
 	"⌥1…9", "⌥←/→", "⌥P",
-	"Ctrl+Shift+C", "Ctrl+Shift+V", "Ctrl+Space", "Завершено", "Alt+1…9", "Alt+←/→", "←/Backspace",
+	"Ctrl+Shift+C", "Ctrl+Space", "Завершено", "Alt+1…9", "Alt+←/→", "←/Backspace",
 	"Tab/↑/↓", "n/н/Esc", "Ctrl+T", "Ctrl+W", "Ctrl+B", "Ctrl+D",
 	"Ctrl+U", "Ctrl+X", "Alt←/→", "Esc q", "n/e/d", "Alt+P", "AltP",
 	"p/←/→",
 	"^Space", "Enter", "Space", "Backspace", "↑/↓", "←/→", "y/д",
-	"shift+tab", "Tab", "Esc", "F5", "^T", "^W", "^B", "^D", "^U", "^⇧C", "^⇧V",
-	"^X", "n", "e", "d", "g", "q", "s", "u", "p", "i", "a", "f", "/",
+	"shift+tab", "Tab", "Esc", "F5", "^T", "^W", "^B", "^D", "^U", "^⇧C",
+	"^X", "d/Del", "Del", "n", "c", "m", "e", "d", "g", "q", "s", "u", "p", "i", "a", "f", "/",
 }
 
 func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	mouse := msg.Mouse()
+	if mouse.Button == tea.MouseRight {
+		if m.page == pageConnected && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
+			if _, ok := m.terminalPointAt(mouse, false); ok {
+				m.filesFocused = false
+				m.rightPasteDown = true
+			}
+		}
+		return m, nil
+	}
+	m.rightPasteDown = false
 	if mouse.Button != tea.MouseLeft {
 		return m, nil
 	}
@@ -33,16 +44,14 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.page == pageConnected && m.forwardModal == nil && m.picker == nil && m.hostKeyPrompt == nil {
+	if m.page == pageConnected && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
 		if point, ok := m.terminalPointAt(mouse, false); ok {
 			m.filesFocused = false
 			m.selection = &terminalSelection{anchor: point, head: point, dragging: true}
 			return m, nil
 		}
-		fileW, _, _, _, _ := m.layout()
 		if mouse.Y > 0 {
-			if !m.sftpHidden && mouse.X < fileW {
-				m.filesFocused = true
+			if m.focusSFTPAt(mouse) {
 				m.selection = nil
 			} else {
 				m.filesFocused = false
@@ -67,7 +76,21 @@ func (m *Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
+	mouse := msg.Mouse()
+	if mouse.Button == tea.MouseRight || m.rightPasteDown {
+		m.rightPasteDown = false
+		if m.page == pageConnected && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
+			if _, ok := m.terminalPointAt(mouse, false); ok {
+				m.filesFocused = false
+				return m, m.requestClipboardPaste()
+			}
+		}
+		return m, nil
+	}
 	if m.selection == nil || !m.selection.dragging || m.term == nil {
+		if m.page == pageConnected && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
+			m.focusSFTPAt(msg.Mouse())
+		}
 		return m, nil
 	}
 	point, _ := m.terminalPointAt(msg.Mouse(), true)
@@ -81,8 +104,29 @@ func (m *Model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 	m.selection.text = m.term.SelectionText(m.selection)
-	m.status = "Текст выделен — используйте сочетание копирования"
-	return m, nil
+	if m.selection.text == "" {
+		m.status = "Не удалось скопировать пустое выделение"
+		return m, nil
+	}
+	return m, m.beginClipboardCopy(m.selection.text)
+}
+
+func (m *Model) focusSFTPAt(mouse tea.Mouse) bool {
+	if m.sftpHidden || mouse.Y <= 0 {
+		return false
+	}
+	fileWidth, _, _, _, _ := m.layout()
+	if mouse.X < 0 || mouse.X >= fileWidth {
+		return false
+	}
+	m.filesFocused = true
+	row := mouse.Y - 3 // tab bar, outer border, then SFTP title
+	index := m.fileOffset + row
+	if row >= 0 && index >= 0 && index < len(m.visible) {
+		m.fileCursor = index
+		m.ensureFileVisible()
+	}
+	return true
 }
 
 func (m *Model) terminalPointAt(mouse tea.Mouse, clampOutside bool) (terminalPoint, bool) {
@@ -131,7 +175,7 @@ func (m *Model) clickedHint(x, y int) string {
 	// In the normal connected view hints only occupy the tab bar and the last
 	// inner row. Restricting the scan prevents SSH output that happens to say
 	// "Enter" or "Esc" from becoming clickable.
-	if m.page == pageConnected && m.forwardModal == nil && m.picker == nil && m.hostKeyPrompt == nil && y != 0 && y != m.height-2 {
+	if m.page == pageConnected && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil && y != 0 && y != m.height-2 && y != m.height-3 && y != m.height-4 {
 		return ""
 	}
 	plain := ansi.Strip(m.viewContent())
@@ -203,12 +247,6 @@ func (m *Model) activateHint(label string) (tea.Model, tea.Cmd) {
 			mod |= tea.ModShift
 		}
 		press = key('c', mod, "")
-	case isPlatformHint(label, keys.paste, compact.paste):
-		mod := commandMod
-		if keys.paste == "Ctrl+Shift+V" {
-			mod |= tea.ModShift
-		}
-		press = key('v', mod, "")
 	case isPlatformHint(label, keys.ports, compact.ports):
 		press = key('p', tea.ModAlt, "")
 	case isPlatformHint(label, keys.tabs, compact.tabs, keys.numberedTabs):
@@ -221,6 +259,8 @@ func (m *Model) activateHint(label string) (tea.Model, tea.Cmd) {
 	}
 	if !platformHint {
 		switch label {
+		case "Shift+Insert/ПКМ", "⇧Ins/ПКМ", "Shift+Insert", "⇧Ins":
+			press = key(tea.KeyInsert, tea.ModShift, "")
 		case "Esc q":
 			if m.page == pageConnected {
 				m.disconnect("Отключено")
@@ -249,11 +289,13 @@ func (m *Model) activateHint(label string) (tea.Model, tea.Cmd) {
 			press = key('p', 0, "p")
 		case "F5":
 			press = key(tea.KeyF5, 0, "")
+		case "Del", "d/Del":
+			press = key(tea.KeyDelete, 0, "")
 		case "y/д":
 			press = key('y', 0, "y")
 		case "n/e/d":
 			press = key('n', 0, "n")
-		case "n", "e", "d", "g", "q", "s", "u", "p", "i", "a", "f", "/":
+		case "n", "c", "m", "e", "d", "g", "q", "s", "u", "p", "i", "a", "f", "/":
 			r := []rune(label)[0]
 			press = key(r, 0, string(r))
 		default:
