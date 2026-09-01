@@ -11,9 +11,9 @@ import (
 
 var clickableHintLabels = []string{
 	"Shift+Insert/ПКМ", "⇧Ins/ПКМ", "Shift+Insert", "⇧Ins",
-	"⌘Space", "⌘T", "⌘W", "⌘B", "⌘C", "⌘D", "⌘U", "⌘X", "⌘Q",
-	"⌥1…9", "⌥←/→", "⌥P",
-	"Ctrl+Shift+C", "Ctrl+Space", "Завершено", "Alt+1…9", "Alt+←/→", "←/Backspace",
+	"Ctrl+Shift+Space", "Ctrl+Shift+1…9", "Ctrl+Shift+←/→", "Ctrl+Shift+P", "Ctrl+Shift+C",
+	"^⇧Space", "^⇧1…9", "^⇧←/→", "^⇧P",
+	"Ctrl+Space", "Завершено", "Alt+1…9", "Alt+←/→", "←/Backspace",
 	"Tab/↑/↓", "n/н/Esc", "Ctrl+T", "Ctrl+W", "Ctrl+B", "Ctrl+D",
 	"Ctrl+U", "Ctrl+X", "Alt←/→", "Esc q", "n/e/d", "Alt+P", "AltP",
 	"p/←/→",
@@ -174,10 +174,7 @@ func (m *Model) terminalPointAt(mouse tea.Mouse, clampOutside bool) (terminalPoi
 
 func (m *Model) clickedTab(x int) int {
 	used := 0
-	keys := compactPlatformKeys()
-	helpWidth := runewidth.StringWidth(ansi.Strip(renderHints(
-		[2]string{keys.newTab, "+"}, [2]string{keys.closeTab, "×"}, [2]string{keys.tabs, "вкладки"},
-	)))
+	helpWidth := runewidth.StringWidth(ansi.Strip(m.tabBarHelp()))
 	for index := range m.tabs {
 		label := " " + strconv.Itoa(index+1) + " " + m.tabTitle(index) + " "
 		width := runewidth.StringWidth(label)
@@ -247,32 +244,28 @@ func (m *Model) activateHint(label string) (tea.Model, tea.Cmd) {
 	}
 	keys := currentPlatformKeys()
 	compact := compactPlatformKeys()
-	commandMod := platformCommandMod()
+	primaryMod := platformPrimaryMod()
 	var press tea.KeyPressMsg
 	platformHint := true
 	switch {
 	case isPlatformHint(label, keys.newTab, compact.newTab):
-		press = key('t', commandMod, "")
+		press = key('t', primaryMod, "")
 	case isPlatformHint(label, keys.closeTab, compact.closeTab):
-		press = key('w', commandMod, "")
+		press = key('w', primaryMod, "")
 	case isPlatformHint(label, keys.toggleSFTP, compact.toggleSFTP):
-		press = key('b', commandMod, "")
+		press = key('b', primaryMod, "")
 	case isPlatformHint(label, keys.download, compact.download):
-		press = key('d', commandMod, "")
+		press = key('d', primaryMod, "")
 	case isPlatformHint(label, keys.upload, compact.upload):
-		press = key('u', commandMod, "")
+		press = key('u', primaryMod, "")
 	case isPlatformHint(label, keys.cancel, compact.cancel):
-		press = key('x', commandMod, "")
+		press = key('x', primaryMod, "")
 	case isPlatformHint(label, keys.focus, compact.focus):
-		press = key(tea.KeySpace, commandMod, "")
+		press = key(tea.KeySpace, platformFocusMod(), "")
 	case isPlatformHint(label, keys.copy, compact.copy):
-		mod := commandMod
-		if keys.copy == "Ctrl+Shift+C" {
-			mod |= tea.ModShift
-		}
-		press = key('c', mod, "")
+		press = key('c', platformCopyMod(), "")
 	case isPlatformHint(label, keys.ports, compact.ports):
-		press = key('p', tea.ModAlt, "")
+		press = key('p', platformNavigationMod(), "")
 	case isPlatformHint(label, keys.tabs, compact.tabs, keys.numberedTabs):
 		if len(m.tabs) > 1 {
 			m.switchTab((m.activeTab + 1) % len(m.tabs))

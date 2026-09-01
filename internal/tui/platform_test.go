@@ -10,40 +10,67 @@ import (
 	"ssh-manager-tui/internal/config"
 )
 
-func TestPlatformHintsUseMacSymbolsOnlyOnDarwin(t *testing.T) {
+func TestPlatformHintsDifferByOS(t *testing.T) {
 	mac := platformKeysForOS("darwin")
-	if mac.newTab != "⌘T" || mac.copy != "⌘C" || mac.tabs != "⌥←/→" || mac.ports != "⌥P" {
+	if mac.newTab != "Ctrl+T" || mac.copy != "Ctrl+Shift+C" || mac.focus != "Ctrl+Shift+Space" || mac.tabs != "Ctrl+Shift+←/→" || mac.ports != "Ctrl+Shift+P" {
 		t.Fatalf("macOS hints = %#v", mac)
 	}
 	linux := platformKeysForOS("linux")
 	if linux.newTab != "Ctrl+T" || linux.copy != "Ctrl+Shift+C" || linux.tabs != "Alt+←/→" || linux.ports != "Alt+P" {
 		t.Fatalf("Linux hints = %#v", linux)
 	}
-	if compactPlatformKeysForOS("darwin").newTab != "⌘T" || compactPlatformKeysForOS("linux").newTab != "^T" {
+	if compactPlatformKeysForOS("darwin").tabs != "^⇧←/→" || compactPlatformKeysForOS("linux").newTab != "^T" {
 		t.Fatal("compact hints do not follow the target platform")
 	}
 }
 
-func TestPlatformShortcutsUseCommandOnDarwin(t *testing.T) {
+func TestPlatformShortcutsUseControlOnDarwin(t *testing.T) {
 	commandT := tea.KeyPressMsg(tea.Key{Code: 'е', BaseCode: 't', Mod: tea.ModSuper})
-	controlT := tea.KeyPressMsg(tea.Key{Code: 't', Mod: tea.ModCtrl})
-	if !matchesPlatformShortcutForOS("darwin", commandT, 't', false) {
-		t.Fatal("Command+T was not recognized on macOS with a non-Latin layout")
+	controlT := tea.KeyPressMsg(tea.Key{Code: 'е', BaseCode: 't', Mod: tea.ModCtrl})
+	if !matchesPlatformShortcutForOS("darwin", controlT, 't', false) {
+		t.Fatal("Ctrl+T was not recognized on macOS with a non-Latin layout")
 	}
-	if matchesPlatformShortcutForOS("darwin", controlT, 't', false) {
-		t.Fatal("Ctrl+T was treated as the macOS application shortcut")
+	if matchesPlatformShortcutForOS("darwin", commandT, 't', false) {
+		t.Fatal("Command+T is still treated as the macOS application shortcut")
 	}
 	if !matchesPlatformShortcutForOS("linux", controlT, 't', false) {
 		t.Fatal("Ctrl+T was not recognized on Linux")
 	}
 
-	commandC := tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModSuper})
 	controlShiftC := tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl | tea.ModShift})
-	if !matchesPlatformShortcutForOS("darwin", commandC, 'c', true) {
-		t.Fatal("Command+C was not recognized as the macOS copy shortcut")
+	if !matchesPlatformShortcutForOS("darwin", controlShiftC, 'c', true) {
+		t.Fatal("Ctrl+Shift+C was not recognized as the macOS copy shortcut")
 	}
 	if !matchesPlatformShortcutForOS("linux", controlShiftC, 'c', true) {
 		t.Fatal("Ctrl+Shift+C was not recognized as the Linux copy shortcut")
+	}
+}
+
+func TestMacNavigationShortcutsAvoidSystemControlAndOptionBindings(t *testing.T) {
+	controlShiftRight := tea.KeyPressMsg(tea.Key{Code: tea.KeyRight, Mod: tea.ModCtrl | tea.ModShift})
+	controlRight := tea.KeyPressMsg(tea.Key{Code: tea.KeyRight, Mod: tea.ModCtrl})
+	optionRight := tea.KeyPressMsg(tea.Key{Code: tea.KeyRight, Mod: tea.ModAlt})
+	if !matchesPlatformNavigationShortcutForOS("darwin", controlShiftRight, tea.KeyRight) {
+		t.Fatal("Ctrl+Shift+Right was not recognized for macOS tab navigation")
+	}
+	if matchesPlatformNavigationShortcutForOS("darwin", controlRight, tea.KeyRight) {
+		t.Fatal("system Ctrl+Right shortcut was captured on macOS")
+	}
+	if matchesPlatformNavigationShortcutForOS("darwin", optionRight, tea.KeyRight) {
+		t.Fatal("Option+Right is still captured on macOS")
+	}
+	if !matchesPlatformNavigationShortcutForOS("linux", optionRight, tea.KeyRight) {
+		t.Fatal("Alt+Right stopped working on Linux")
+	}
+	controlShiftOne := tea.KeyPressMsg(tea.Key{Code: '!', BaseCode: '1', Mod: tea.ModCtrl | tea.ModShift})
+	if !matchesPlatformNavigationShortcutForOS("darwin", controlShiftOne, '1') {
+		t.Fatal("Ctrl+Shift+1 was not recognized from its shifted key code")
+	}
+
+	controlSpace := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl})
+	controlShiftSpace := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl | tea.ModShift})
+	if matchesPlatformFocusShortcutForOS("darwin", controlSpace) || !matchesPlatformFocusShortcutForOS("darwin", controlShiftSpace) {
+		t.Fatal("macOS focus shortcut must be Ctrl+Shift+Space")
 	}
 }
 

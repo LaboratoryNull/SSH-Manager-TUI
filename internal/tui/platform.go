@@ -20,10 +20,10 @@ func currentPlatformKeys() platformKeys { return platformKeysForOS(runtime.GOOS)
 func platformKeysForOS(goos string) platformKeys {
 	if goos == "darwin" {
 		return platformKeys{
-			newTab: "⌘T", closeTab: "⌘W", toggleSFTP: "⌘B",
-			copy: "⌘C", cancel: "⌘X", focus: "⌘Space",
-			download: "⌘D", upload: "⌘U", quit: "⌘Q",
-			tabs: "⌥←/→", numberedTabs: "⌥1…9", ports: "⌥P",
+			newTab: "Ctrl+T", closeTab: "Ctrl+W", toggleSFTP: "Ctrl+B",
+			copy: "Ctrl+Shift+C", cancel: "Ctrl+X", focus: "Ctrl+Shift+Space",
+			download: "Ctrl+D", upload: "Ctrl+U", quit: "Ctrl+Q",
+			tabs: "Ctrl+Shift+←/→", numberedTabs: "Ctrl+Shift+1…9", ports: "Ctrl+Shift+P",
 		}
 	}
 	return platformKeys{
@@ -40,26 +40,48 @@ func compactPlatformKeys() platformKeys {
 
 func compactPlatformKeysForOS(goos string) platformKeys {
 	keys := platformKeysForOS(goos)
-	if goos != "darwin" {
-		keys.newTab, keys.closeTab, keys.toggleSFTP = "^T", "^W", "^B"
-		keys.cancel, keys.focus, keys.download, keys.upload = "^X", "^Space", "^D", "^U"
-		keys.copy = "^⇧C"
+	keys.newTab, keys.closeTab, keys.toggleSFTP = "^T", "^W", "^B"
+	keys.cancel, keys.download, keys.upload = "^X", "^D", "^U"
+	keys.copy = "^⇧C"
+	if goos == "darwin" {
+		keys.focus, keys.tabs, keys.ports = "^⇧Space", "^⇧←/→", "^⇧P"
+		keys.numberedTabs = "^⇧1…9"
+	} else {
+		keys.focus = "^Space"
 		keys.tabs, keys.ports = "Alt←/→", "AltP"
 	}
 	return keys
 }
 
-func matchesPlatformShortcut(key tea.KeyPressMsg, code rune, shiftedOnNonMac bool) bool {
-	return matchesPlatformShortcutForOS(runtime.GOOS, key, code, shiftedOnNonMac)
+func matchesPlatformShortcut(key tea.KeyPressMsg, code rune, shifted bool) bool {
+	return matchesPlatformShortcutForOS(runtime.GOOS, key, code, shifted)
 }
 
-func matchesPlatformShortcutForOS(goos string, key tea.KeyPressMsg, code rune, shiftedOnNonMac bool) bool {
-	expected := tea.ModCtrl
-	if goos == "darwin" {
-		expected = tea.ModSuper
-	} else if shiftedOnNonMac {
+func matchesPlatformShortcutForOS(goos string, key tea.KeyPressMsg, code rune, shifted bool) bool {
+	expected := platformPrimaryModForOS(goos)
+	if shifted {
 		expected |= tea.ModShift
 	}
+	return matchesShortcut(key, code, expected)
+}
+
+func matchesPlatformFocusShortcut(key tea.KeyPressMsg) bool {
+	return matchesPlatformFocusShortcutForOS(runtime.GOOS, key)
+}
+
+func matchesPlatformFocusShortcutForOS(goos string, key tea.KeyPressMsg) bool {
+	return matchesShortcut(key, tea.KeySpace, platformFocusModForOS(goos))
+}
+
+func matchesPlatformNavigationShortcut(key tea.KeyPressMsg, code rune) bool {
+	return matchesPlatformNavigationShortcutForOS(runtime.GOOS, key, code)
+}
+
+func matchesPlatformNavigationShortcutForOS(goos string, key tea.KeyPressMsg, code rune) bool {
+	return matchesShortcut(key, code, platformNavigationModForOS(goos))
+}
+
+func matchesShortcut(key tea.KeyPressMsg, code rune, expected tea.KeyMod) bool {
 	meaningful := key.Mod & (tea.ModCtrl | tea.ModAlt | tea.ModShift | tea.ModMeta | tea.ModHyper | tea.ModSuper)
 	actual := key.Code
 	if key.BaseCode != 0 {
@@ -68,15 +90,32 @@ func matchesPlatformShortcutForOS(goos string, key tea.KeyPressMsg, code rune, s
 	return meaningful == expected && unicode.ToLower(actual) == unicode.ToLower(code)
 }
 
-func platformCommandMod() tea.KeyMod {
-	return platformCommandModForOS(runtime.GOOS)
+func platformPrimaryMod() tea.KeyMod {
+	return platformPrimaryModForOS(runtime.GOOS)
 }
 
-func platformCommandModForOS(goos string) tea.KeyMod {
+func platformPrimaryModForOS(string) tea.KeyMod {
+	return tea.ModCtrl
+}
+
+func platformCopyMod() tea.KeyMod { return tea.ModCtrl | tea.ModShift }
+
+func platformFocusMod() tea.KeyMod { return platformFocusModForOS(runtime.GOOS) }
+
+func platformFocusModForOS(goos string) tea.KeyMod {
 	if goos == "darwin" {
-		return tea.ModSuper
+		return tea.ModCtrl | tea.ModShift
 	}
 	return tea.ModCtrl
+}
+
+func platformNavigationMod() tea.KeyMod { return platformNavigationModForOS(runtime.GOOS) }
+
+func platformNavigationModForOS(goos string) tea.KeyMod {
+	if goos == "darwin" {
+		return tea.ModCtrl | tea.ModShift
+	}
+	return tea.ModAlt
 }
 
 func isPlatformHint(label string, values ...string) bool {

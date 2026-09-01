@@ -535,15 +535,15 @@ func (m *Model) handleTabKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, true
 	}
-	s := key.Keystroke()
-	switch s {
-	case "alt+left":
+	if matchesPlatformNavigationShortcut(key, tea.KeyLeft) {
 		m.switchTab((m.activeTab - 1 + len(m.tabs)) % len(m.tabs))
 		return m, nil, true
-	case "alt+right":
+	}
+	if matchesPlatformNavigationShortcut(key, tea.KeyRight) {
 		m.switchTab((m.activeTab + 1) % len(m.tabs))
 		return m, nil, true
-	case "alt+p":
+	}
+	if matchesPlatformNavigationShortcut(key, 'p') {
 		if m.page == pageConnected {
 			if m.forwardModal == nil {
 				m.forwardModal = &forwardModal{}
@@ -553,12 +553,13 @@ func (m *Model) handleTabKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, true
 	}
-	if strings.HasPrefix(s, "alt+") && len(s) == len("alt+1") {
-		number := int(s[len(s)-1] - '0')
-		if number >= 1 && number <= 9 && number <= len(m.tabs) {
-			m.switchTab(number - 1)
+	for number := 1; number <= 9; number++ {
+		if matchesPlatformNavigationShortcut(key, rune('0'+number)) {
+			if number <= len(m.tabs) {
+				m.switchTab(number - 1)
+			}
+			return m, nil, true
 		}
-		return m, nil, true
 	}
 	return m, nil, false
 }
@@ -807,7 +808,7 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.status = "Для выхода нажмите q после Esc"
 		return m, escapeTimeoutCommand(m.tabID, m.escapeID)
 	}
-	if matchesPlatformShortcut(key, tea.KeySpace, false) || (runtime.GOOS != "darwin" && s == "ctrl+@") {
+	if matchesPlatformFocusShortcut(key) || (runtime.GOOS != "darwin" && s == "ctrl+@") {
 		if m.sftpHidden {
 			return m, nil
 		}
@@ -1028,11 +1029,7 @@ func (m *Model) viewContent() string {
 func (m *Model) tabsView() string {
 	parts := make([]string, 0, len(m.tabs)+1)
 	used := 0
-	keys := compactPlatformKeys()
-	help := renderHints([2]string{keys.newTab, "+"}, [2]string{keys.closeTab, "×"}, [2]string{keys.tabs, "вкладки"})
-	if m.themeHintVisible() {
-		help += "  " + renderHints([2]string{"t", "тема: " + currentThemeName(m.config.Theme)})
-	}
+	help := m.tabBarHelp()
 	for index := range m.tabs {
 		label := fmt.Sprintf(" %d %s ", index+1, m.tabTitle(index))
 		style := lipgloss.NewStyle().Foreground(muted).Background(surface)
@@ -1053,6 +1050,15 @@ func (m *Model) tabsView() string {
 		line += strings.Repeat(" ", remaining) + help
 	}
 	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Render(line)
+}
+
+func (m *Model) tabBarHelp() string {
+	keys := compactPlatformKeys()
+	help := renderHints([2]string{keys.newTab, "+"}, [2]string{keys.closeTab, "×"}, [2]string{keys.tabs, "вкладки"})
+	if m.themeHintVisible() {
+		help += "  " + renderHints([2]string{"t", "тема: " + currentThemeName(m.config.Theme)})
+	}
+	return help
 }
 
 func (m *Model) themeHintVisible() bool {
