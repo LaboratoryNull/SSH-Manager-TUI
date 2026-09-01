@@ -1,23 +1,45 @@
 APP              := sshm
 COMPAT_APP       := ssh-manager
+
+ifeq ($(OS),Windows_NT)
+SHELL            := cmd.exe
+endif
+
 PREFIX           ?= /usr/local
 BINDIR           ?= $(PREFIX)/bin
 DESTDIR          ?=
 DISTDIR          ?= dist
 INSTALL          ?= install
-VERSION          ?= $(shell git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null | sed 's/^/dev-/')
-COMMIT           ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-BUILD_DATE       ?= $(shell git show -s --format=%cI HEAD 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
 UPDATE_URL       ?= https://git.dx.vlabs/infra/ssh-manager-tui/-/releases/permalink/latest/downloads/manifest.json
+
+ifeq ($(OS),Windows_NT)
+VERSION          ?= unknown
+COMMIT           ?= unknown
+BUILD_DATE       ?= unknown
+else
+NULLDEV          := /dev/null
+GIT_DATE_FORMAT  := %cI
+
+GIT_TAG          := $(shell git describe --tags --exact-match 2>$(NULLDEV))
+GIT_COMMIT       := $(shell git rev-parse --short HEAD 2>$(NULLDEV))
+GIT_BUILD_DATE   := $(shell git show -s --format=$(GIT_DATE_FORMAT) HEAD 2>$(NULLDEV))
+
+VERSION          ?= $(if $(GIT_TAG),$(GIT_TAG),$(if $(GIT_COMMIT),dev-$(GIT_COMMIT),unknown))
+COMMIT           ?= $(if $(GIT_COMMIT),$(GIT_COMMIT),unknown)
+BUILD_DATE       ?= $(if $(GIT_BUILD_DATE),$(GIT_BUILD_DATE),unknown)
+endif
 RELEASE_BASE_URL ?= https://git.dx.vlabs/infra/ssh-manager-tui/-/releases/$(VERSION)/downloads
 LDFLAGS          := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE) -X main.updateManifestURL=$(UPDATE_URL)
 
-.PHONY: all build test race vet fmt install uninstall update release clean
+.PHONY: all build win windows test race vet fmt install uninstall update release clean
 
 all: build
 
 build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o $(APP) .
+
+win windows:
+	$(MAKE) build APP=$(APP).exe GOOS=windows GOARCH=amd64
 
 test:
 	go test ./...

@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -51,6 +52,9 @@ func TestLocalSizeRejectsSymlinks(t *testing.T) {
 	}
 	link := filepath.Join(dir, "link")
 	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink creation requires additional Windows privileges: %v", err)
+		}
 		t.Fatal(err)
 	}
 	if _, err := localSize(context.Background(), link); err == nil {
@@ -100,11 +104,43 @@ func TestDroppedLocalPathsRecognizesQuotedEscapedAndURIPaths(t *testing.T) {
 	if !ok || len(paths) != 2 || paths[0] != first || paths[1] != second {
 		t.Fatalf("shell paths = %#v, ok=%v", paths, ok)
 	}
-	uriList := (&url.URL{Scheme: "file", Path: first}).String() + "\r\n" + (&url.URL{Scheme: "file", Path: second}).String()
+	uriList := fileDropURL(first) + "\r\n" + fileDropURL(second)
 	paths, ok = droppedLocalPaths(uriList)
 	if !ok || len(paths) != 2 || paths[0] != first || paths[1] != second {
 		t.Fatalf("URI paths = %#v, ok=%v", paths, ok)
 	}
+}
+
+func TestDroppedLocalPathsRecognizesWindowsPaths(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific drag-and-drop formats")
+	}
+	directory := t.TempDir()
+	first := filepath.Join(directory, "first file.txt")
+	second := filepath.Join(directory, "second.txt")
+	if err := os.WriteFile(first, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	paths, ok := droppedLocalPaths(second)
+	if !ok || len(paths) != 1 || paths[0] != second {
+		t.Fatalf("raw Windows path = %#v, ok=%v", paths, ok)
+	}
+	paths, ok = droppedLocalPaths(fileDropURL(first))
+	if !ok || len(paths) != 1 || paths[0] != first {
+		t.Fatalf("Windows file URL = %#v, ok=%v", paths, ok)
+	}
+}
+
+func fileDropURL(localPath string) string {
+	escaped := strings.ReplaceAll(url.PathEscape(filepath.ToSlash(localPath)), "%2F", "/")
+	if runtime.GOOS == "windows" {
+		return "file:///" + escaped
+	}
+	return "file://" + escaped
 }
 
 func TestDroppedLocalPathsLeavesOrdinaryPasteAlone(t *testing.T) {

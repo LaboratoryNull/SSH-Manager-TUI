@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -26,18 +28,114 @@ func TestLayoutUsesTwentyPercentForFiles(t *testing.T) {
 	}
 }
 
-func TestCtrlSpaceSwitchesConnectedPane(t *testing.T) {
+func TestFocusShortcutSwitchesConnectedPane(t *testing.T) {
 	m := &Model{page: pageConnected, filesFocused: true}
-	_, cmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl}))
+	_, cmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: platformFocusMod()}))
 	if m.filesFocused {
-		t.Fatal("Ctrl+Space did not switch focus to the terminal")
+		t.Fatalf("%s did not switch focus to the terminal", currentPlatformKeys().focus)
 	}
 	if cmd != nil {
-		t.Fatal("Ctrl+Space should not be forwarded to SSH")
+		t.Fatal("focus shortcut should not be forwarded to SSH")
 	}
 	_, _ = m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: '@', Mod: tea.ModCtrl}))
-	if !m.filesFocused {
+	if runtime.GOOS == "windows" && m.filesFocused {
+		t.Fatal("legacy Ctrl+@ encoding switched focus on Windows")
+	}
+	if runtime.GOOS != "windows" && !m.filesFocused {
 		t.Fatal("legacy Ctrl+@ encoding did not switch focus back to SFTP")
+	}
+}
+
+func TestWindowsViewKeepsMouseTrackingEnabled(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific terminal behavior")
+	}
+	m := &Model{width: 100, height: 30, page: pageConnected}
+	if mouseMode := m.View().MouseMode; mouseMode != tea.MouseModeCellMotion {
+		t.Fatalf("Windows mouse mode = %v, want cell motion", mouseMode)
+	}
+	if !m.View().DisableBracketedPasteMode {
+		t.Fatal("Windows bracketed paste must stay disabled so file drops arrive as raw text")
+	}
+}
+
+func TestWindowsAmbiguousCtrlNeedsSecondNULForFocus(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific terminal behavior")
+	}
+	m := &Model{page: pageConnected, tabID: 1, sftpHidden: false}
+	ambiguous := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl})
+	_, cmd := m.Update(ambiguous)
+	if cmd == nil || m.filesFocused || !m.windowsCtrlWait {
+		t.Fatalf("first NUL: cmd=%v focused=%v pending=%v", cmd != nil, m.filesFocused, m.windowsCtrlWait)
+	}
+	_, _ = m.Update(ambiguous)
+	if !m.filesFocused || m.windowsCtrlWait {
+		t.Fatalf("second NUL: focused=%v pending=%v", m.filesFocused, m.windowsCtrlWait)
+	}
+}
+
+func TestWindowsStandaloneCtrlDoesNotSwitchFocus(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific terminal behavior")
+	}
+	m := &Model{page: pageConnected, tabID: 1, sftpHidden: false}
+	ambiguous := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl})
+	_, _ = m.Update(ambiguous)
+	_, _ = m.Update(windowsCtrlTimeoutMsg{id: m.windowsCtrlID, tabID: m.tabID})
+	if m.filesFocused || m.windowsCtrlWait {
+		t.Fatalf("standalone Ctrl: focused=%v pending=%v", m.filesFocused, m.windowsCtrlWait)
+	}
+}
+
+func TestWindowsCtrlHotkeyClearsPendingModifierEvent(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific terminal behavior")
+	}
+	m := &Model{page: pageConnected, tabID: 1, sftpHidden: false}
+	ambiguous := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl})
+	_, _ = m.Update(ambiguous)
+	_, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
+	if !m.sftpHidden || m.filesFocused || m.windowsCtrlWait {
+		t.Fatalf("Ctrl+B: hidden=%v focused=%v pending=%v", m.sftpHidden, m.filesFocused, m.windowsCtrlWait)
+	}
+}
+
+func TestWindowsRawInputBuffersPrintableTerminalText(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific terminal behavior")
+	}
+	m := &Model{page: pageConnected, tabID: 1, conn: &remote.Connection{}}
+	_, cmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'C', Text: "C"}))
+	if cmd == nil || m.windowsRawInput != "C" {
+		t.Fatalf("raw input buffer = %q, cmd=%v", m.windowsRawInput, cmd != nil)
+	}
+	_, _ = m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl}))
+	if !m.filesFocused || m.windowsRawInput != "" {
+		t.Fatalf("Ctrl+Space state: focused=%v raw=%q", m.filesFocused, m.windowsRawInput)
+	}
+}
+
+func TestWindowsDropIsBufferedWhileSFTPIsFocused(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific terminal behavior")
+	}
+	localPath := filepath.Join(t.TempDir(), "drop.txt")
+	if err := os.WriteFile(localPath, []byte("drop"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := &fileNode{Name: "root", Path: "/root", Dir: true}
+	m := &Model{
+		page: pageConnected, tabID: 1, filesFocused: true, transferring: true,
+		conn: &remote.Connection{Home: "/root"}, root: root, visible: []*fileNode{root},
+		selection: &terminalSelection{},
+	}
+	for _, r := range localPath {
+		_, _ = m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)}))
+	}
+	_ = m.flushWindowsRawInputNow()
+	if m.selection != nil {
+		t.Fatal("drop path was replayed as SFTP hotkeys instead of being recognized")
 	}
 }
 
@@ -452,7 +550,7 @@ func TestSFTPActionHotkeysOpenDialogs(t *testing.T) {
 	}
 	for _, test := range tests {
 		m.sftpDialog = nil
-		_, _ = m.handleConnectedKey(tea.KeyPressMsg(test.key))
+		_, _ = m.handleConnectedFilesKey(tea.KeyPressMsg(test.key).Keystroke())
 		if m.sftpDialog == nil || m.sftpDialog.action != test.action {
 			t.Fatalf("key %q opened dialog %#v, want action %v", test.key.Keystroke(), m.sftpDialog, test.action)
 		}

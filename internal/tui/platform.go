@@ -26,6 +26,14 @@ func platformKeysForOS(goos string) platformKeys {
 			tabs: "Ctrl+Shift+←/→", numberedTabs: "Ctrl+Shift+1…9", ports: "Ctrl+Shift+P",
 		}
 	}
+	if goos == "windows" {
+		return platformKeys{
+			newTab: "Ctrl+T", closeTab: "Ctrl+W", toggleSFTP: "Ctrl+B",
+			copy: "Ctrl+Shift+C", cancel: "Ctrl+X", focus: "Ctrl+Space",
+			download: "Ctrl+D", upload: "Ctrl+U", quit: "Ctrl+Q",
+			tabs: "Alt+←/→", numberedTabs: "Alt+1…9", ports: "Alt+P",
+		}
+	}
 	return platformKeys{
 		newTab: "Ctrl+T", closeTab: "Ctrl+W", toggleSFTP: "Ctrl+B",
 		copy: "Ctrl+Shift+C", cancel: "Ctrl+X", focus: "Ctrl+Space",
@@ -46,6 +54,9 @@ func compactPlatformKeysForOS(goos string) platformKeys {
 	if goos == "darwin" {
 		keys.focus, keys.tabs, keys.ports = "^⇧Space", "^⇧←/→", "^⇧P"
 		keys.numberedTabs = "^⇧1…9"
+	} else if goos == "windows" {
+		keys.focus = "^Space"
+		keys.tabs, keys.ports = "Alt←/→", "AltP"
 	} else {
 		keys.focus = "^Space"
 		keys.tabs, keys.ports = "Alt←/→", "AltP"

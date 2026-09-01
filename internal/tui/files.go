@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -178,11 +179,8 @@ func droppedLocalPaths(content string) (paths []string, ok bool) {
 	for _, token := range tokens {
 		localPath := token
 		if strings.HasPrefix(token, "file://") {
-			u, err := url.Parse(token)
-			if err != nil || u.Scheme != "file" || (u.Host != "" && u.Host != "localhost") {
-				return nil, false
-			}
-			localPath, err = url.PathUnescape(u.EscapedPath())
+			var err error
+			localPath, err = localPathFromFileURL(token)
 			if err != nil {
 				return nil, false
 			}
@@ -200,6 +198,28 @@ func droppedLocalPaths(content string) (paths []string, ok bool) {
 		}
 	}
 	return paths, len(paths) > 0
+}
+
+func localPathFromFileURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "file" || (u.Host != "" && u.Host != "localhost") {
+		return "", fmt.Errorf("unsupported file URL: %s", rawURL)
+	}
+	localPath, err := url.PathUnescape(u.EscapedPath())
+	if err != nil {
+		return "", err
+	}
+	if runtime.GOOS == "windows" {
+		if len(localPath) >= 3 && localPath[0] == '/' && localPath[2] == ':' && isASCIILetter(localPath[1]) {
+			localPath = localPath[1:]
+		}
+		localPath = filepath.FromSlash(localPath)
+	}
+	return localPath, nil
+}
+
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func splitDroppedText(content string) ([]string, bool) {
@@ -227,21 +247,30 @@ func splitDroppedText(content string) ([]string, bool) {
 	var result []string
 	var token strings.Builder
 	var quote rune
-	escaped := false
 	flush := func() {
 		if token.Len() > 0 {
 			result = append(result, token.String())
 			token.Reset()
 		}
 	}
-	for _, r := range content {
-		if escaped {
-			token.WriteRune(r)
-			escaped = false
-			continue
-		}
+	runes := []rune(content)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		if r == '\\' && quote != '\'' {
-			escaped = true
+			if i+1 >= len(runes) {
+				if runtime.GOOS != "windows" {
+					return nil, false
+				}
+				token.WriteRune(r)
+				continue
+			}
+			next := runes[i+1]
+			if runtime.GOOS != "windows" || next == ' ' || next == '\t' || next == '\r' || next == '\n' || next == '\'' || next == '"' {
+				token.WriteRune(next)
+				i++
+				continue
+			}
+			token.WriteRune(r)
 			continue
 		}
 		if quote != 0 {
@@ -261,7 +290,7 @@ func splitDroppedText(content string) ([]string, bool) {
 			token.WriteRune(r)
 		}
 	}
-	if escaped || quote != 0 {
+	if quote != 0 {
 		return nil, false
 	}
 	flush()

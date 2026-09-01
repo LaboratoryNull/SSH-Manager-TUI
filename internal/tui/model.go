@@ -41,6 +41,11 @@ const (
 	hostGroupInput
 )
 
+const (
+	windowsRawInputDelay = 35 * time.Millisecond
+	windowsCtrlDelay     = 500 * time.Millisecond
+)
+
 type connectMsg struct {
 	conn    *remote.Connection
 	profile config.Session
@@ -60,6 +65,14 @@ type shellOutputMsg struct {
 	source *remote.Connection
 }
 type escapeTimeoutMsg struct {
+	id    uint64
+	tabID uint64
+}
+type windowsRawInputTimeoutMsg struct {
+	id    uint64
+	tabID uint64
+}
+type windowsCtrlTimeoutMsg struct {
 	id    uint64
 	tabID uint64
 }
@@ -99,6 +112,11 @@ type tabState struct {
 	sftpOperationID uint64
 	escapePending   bool
 	escapeID        uint64
+	windowsRawInput string
+	windowsRawID    uint64
+	windowsRawSFTP  bool
+	windowsCtrlWait bool
+	windowsCtrlID   uint64
 
 	transferring         bool
 	transferCh           <-chan transferProgressMsg
@@ -165,6 +183,11 @@ type Model struct {
 	sftpOperationID uint64
 	escapePending   bool
 	escapeID        uint64
+	windowsRawInput string
+	windowsRawID    uint64
+	windowsRawSFTP  bool
+	windowsCtrlWait bool
+	windowsCtrlID   uint64
 
 	transferring         bool
 	transferCh           <-chan transferProgressMsg
@@ -360,6 +383,13 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case windowsRawInputTimeoutMsg:
+		return m.flushWindowsRawInput(msg.id)
+	case windowsCtrlTimeoutMsg:
+		if msg.id == m.windowsCtrlID {
+			m.windowsCtrlWait = false
+		}
+		return m, nil
 	case transferProgressMsg:
 		if m.transferCh == nil || msg.source != m.transferCh {
 			return m, nil
@@ -434,6 +464,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPressMsg:
+		if runtime.GOOS == "windows" {
+			if cmd, consumed := m.handleWindowsAmbiguousCtrl(msg); consumed {
+				return m, cmd
+			}
+		}
 		if model, cmd, handled := m.handleTabKey(msg); handled {
 			return model, cmd
 		}
@@ -765,6 +800,11 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.cancelTransfer()
 		return m, nil
 	}
+	if runtime.GOOS == "windows" && m.windowsRawInput != "" && !windowsRawTextKey(key) {
+		if cmd := m.flushWindowsRawInputNow(); cmd != nil {
+			return m, cmd
+		}
+	}
 	if matchesPlatformShortcut(key, 'c', true) && !m.filesFocused {
 		text := ""
 		selected := m.selection != nil && m.selection.hasRange()
@@ -808,12 +848,17 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.status = "Для выхода нажмите q после Esc"
 		return m, escapeTimeoutCommand(m.tabID, m.escapeID)
 	}
-	if matchesPlatformFocusShortcut(key) || (runtime.GOOS != "darwin" && s == "ctrl+@") {
+	if matchesPlatformFocusShortcut(key) || (runtime.GOOS != "darwin" && runtime.GOOS != "windows" && s == "ctrl+@") {
 		if m.sftpHidden {
 			return m, nil
 		}
 		m.filesFocused = !m.filesFocused
 		return m, nil
+	}
+	if runtime.GOOS == "windows" {
+		if text, ok := windowsRawText(key); ok {
+			return m, m.bufferWindowsRawInput(text)
+		}
 	}
 	if m.filesFocused && matchesPlatformShortcut(key, 'd', false) {
 		return m, m.openDownloadPicker()
@@ -822,53 +867,145 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.openUploadPicker()
 	}
 	if m.filesFocused {
-		switch s {
-		case "up", "k":
-			if m.fileCursor > 0 {
-				m.fileCursor--
-			}
-			m.ensureFileVisible()
-		case "down", "j":
-			if m.fileCursor+1 < len(m.visible) {
-				m.fileCursor++
-			}
-			m.ensureFileVisible()
-		case "enter", "right", "l":
-			return m, m.expandSelected()
-		case "left", "h":
-			return m, m.collapseSelected()
-		case "backspace":
-			return m, m.openRemoteDirectory(path.Dir(m.root.Path))
-		case "r", "f5":
-			return m, m.reloadSelectedDirectory()
-		case "delete", "d":
-			return m, m.openSFTPAction(sftpActionDelete)
-		case "n":
-			return m, m.openSFTPAction(sftpActionMkdir)
-		case "c":
-			return m, m.openSFTPAction(sftpActionCopy)
-		case "m":
-			return m, m.openSFTPAction(sftpActionMove)
-		case "/":
-			return m, m.openRemoteDirectory("/")
-		case "home":
-			return m, m.openRemoteDirectory(m.conn.Home)
-		}
-		return m, nil
+		return m.handleConnectedFilesKey(s)
 	}
 	data := keyBytes(key)
 	if m.term != nil {
 		m.term.ScrollToBottom()
 		data = m.term.KeyBytes(key)
 	}
-	if len(data) == 0 {
+	m.sendTerminalInput(data)
+	return m, nil
+}
+
+func (m *Model) handleConnectedFilesKey(s string) (tea.Model, tea.Cmd) {
+	switch s {
+	case "up", "k":
+		if m.fileCursor > 0 {
+			m.fileCursor--
+		}
+		m.ensureFileVisible()
+	case "down", "j":
+		if m.fileCursor+1 < len(m.visible) {
+			m.fileCursor++
+		}
+		m.ensureFileVisible()
+	case "enter", "right", "l":
+		return m, m.expandSelected()
+	case "left", "h":
+		return m, m.collapseSelected()
+	case "backspace":
+		return m, m.openRemoteDirectory(path.Dir(m.root.Path))
+	case "r", "f5":
+		return m, m.reloadSelectedDirectory()
+	case "delete", "d":
+		return m, m.openSFTPAction(sftpActionDelete)
+	case "n":
+		return m, m.openSFTPAction(sftpActionMkdir)
+	case "c":
+		return m, m.openSFTPAction(sftpActionCopy)
+	case "m":
+		return m, m.openSFTPAction(sftpActionMove)
+	case "/":
+		return m, m.openRemoteDirectory("/")
+	case "home":
+		return m, m.openRemoteDirectory(m.conn.Home)
+	}
+	return m, nil
+}
+
+func windowsRawTextKey(key tea.KeyPressMsg) bool {
+	_, ok := windowsRawText(key)
+	return ok
+}
+
+func windowsRawText(key tea.KeyPressMsg) (string, bool) {
+	if key.Text == "" {
+		return "", false
+	}
+	blocked := tea.ModCtrl | tea.ModAlt | tea.ModMeta | tea.ModHyper | tea.ModSuper
+	if key.Mod&blocked != 0 {
+		return "", false
+	}
+	return key.Text, true
+}
+
+func (m *Model) bufferWindowsRawInput(text string) tea.Cmd {
+	if m.windowsRawInput == "" {
+		m.windowsRawSFTP = m.filesFocused
+	}
+	m.windowsRawInput += text
+	m.windowsRawID++
+	return windowsRawInputTimeoutCommand(m.tabID, m.windowsRawID)
+}
+
+func (m *Model) flushWindowsRawInput(id uint64) (tea.Model, tea.Cmd) {
+	if id != m.windowsRawID {
 		return m, nil
+	}
+	return m, m.flushWindowsRawInputNow()
+}
+
+func (m *Model) flushWindowsRawInputNow() tea.Cmd {
+	content := m.windowsRawInput
+	wasSFTPFocused := m.windowsRawSFTP
+	m.windowsRawInput = ""
+	m.windowsRawSFTP = false
+	if content == "" {
+		return nil
+	}
+	if localPaths, ok := droppedLocalPaths(content); ok {
+		m.selection = nil
+		return m.startUpload(localPaths, m.dropUploadTarget())
+	}
+	if wasSFTPFocused {
+		var commands []tea.Cmd
+		for _, r := range content {
+			_, cmd := m.handleConnectedFilesKey(string(r))
+			if cmd != nil {
+				commands = append(commands, cmd)
+			}
+		}
+		return tea.Batch(commands...)
+	}
+	m.sendTerminalInput([]byte(content))
+	return nil
+}
+
+func (m *Model) handleWindowsAmbiguousCtrl(key tea.KeyPressMsg) (tea.Cmd, bool) {
+	if !isAmbiguousWindowsCtrlSpace(key) {
+		if m.windowsCtrlWait {
+			m.windowsCtrlWait = false
+			m.windowsCtrlID++
+		}
+		return nil, false
+	}
+	if m.windowsCtrlWait {
+		m.windowsCtrlWait = false
+		m.windowsCtrlID++
+		return nil, false
+	}
+	m.windowsCtrlWait = true
+	m.windowsCtrlID++
+	return windowsCtrlTimeoutCommand(m.tabID, m.windowsCtrlID), true
+}
+
+func isAmbiguousWindowsCtrlSpace(key tea.KeyPressMsg) bool {
+	meaningful := key.Mod & (tea.ModCtrl | tea.ModAlt | tea.ModShift | tea.ModMeta | tea.ModHyper | tea.ModSuper)
+	return key.Code == tea.KeySpace && key.BaseCode == 0 && key.Text == "" && meaningful == tea.ModCtrl
+}
+
+func (m *Model) sendTerminalInput(data []byte) {
+	if len(data) == 0 || m.conn == nil {
+		return
+	}
+	if m.term != nil {
+		m.term.ScrollToBottom()
 	}
 	if err := m.conn.Send(data); err != nil {
 		m.status = "Ошибка записи в SSH: " + err.Error()
 	}
 	m.selection = nil
-	return m, nil
 }
 
 func (m *Model) handleConnectedPaste(content string) (tea.Model, tea.Cmd) {
@@ -984,6 +1121,10 @@ func (m *Model) View() tea.View {
 	view.KeyboardEnhancements.ReportAlternateKeys = true
 	view.KeyboardEnhancements.ReportAllKeysAsEscapeCodes = true
 	view.KeyboardEnhancements.ReportAssociatedText = true
+	// Windows terminal hosts implement file drops as paste operations. Keep
+	// bracketed paste disabled there so dropped paths reach the Windows raw-input
+	// accumulator instead of the currently unreliable Bubble Tea PasteMsg path.
+	view.DisableBracketedPasteMode = runtime.GOOS == "windows"
 	view.MouseMode = tea.MouseModeCellMotion
 	return view
 }
@@ -2103,6 +2244,8 @@ func (m *Model) captureTab() *tabState {
 		fileCursor: m.fileCursor, fileOffset: m.fileOffset, picker: m.picker,
 		sftpDialog: m.sftpDialog, sftpBusy: m.sftpBusy, sftpOperationID: m.sftpOperationID,
 		escapePending: m.escapePending, escapeID: m.escapeID,
+		windowsRawInput: m.windowsRawInput, windowsRawID: m.windowsRawID, windowsRawSFTP: m.windowsRawSFTP,
+		windowsCtrlWait: m.windowsCtrlWait, windowsCtrlID: m.windowsCtrlID,
 		transferring: m.transferring, transferCh: m.transferCh, transferDone: m.transferDone,
 		transferTotal: m.transferTotal, transferPath: m.transferPath, transferErr: m.transferErr,
 		transferUpload: m.transferUpload, transferStarted: m.transferStarted,
@@ -2135,6 +2278,8 @@ func (m *Model) restoreTab(index int) {
 	m.picker, m.sftpDialog = state.picker, state.sftpDialog
 	m.sftpBusy, m.sftpOperationID = state.sftpBusy, state.sftpOperationID
 	m.escapePending, m.escapeID = state.escapePending, state.escapeID
+	m.windowsRawInput, m.windowsRawID, m.windowsRawSFTP = state.windowsRawInput, state.windowsRawID, state.windowsRawSFTP
+	m.windowsCtrlWait, m.windowsCtrlID = state.windowsCtrlWait, state.windowsCtrlID
 	m.transferring, m.transferCh = state.transferring, state.transferCh
 	m.transferDone, m.transferTotal, m.transferPath = state.transferDone, state.transferTotal, state.transferPath
 	m.transferErr, m.transferUpload, m.transferCancel = state.transferErr, state.transferUpload, state.transferCancel
@@ -2160,6 +2305,8 @@ func (m *Model) resetTab(id uint64) {
 	m.root, m.visible, m.fileCursor, m.fileOffset = nil, nil, 0, 0
 	m.picker, m.sftpDialog, m.sftpBusy, m.sftpOperationID = nil, nil, false, 0
 	m.escapePending, m.escapeID = false, 0
+	m.windowsRawInput, m.windowsRawID, m.windowsRawSFTP = "", 0, false
+	m.windowsCtrlWait, m.windowsCtrlID = false, 0
 	m.transferring, m.transferCh, m.transferCancel = false, nil, nil
 	m.transferDone, m.transferTotal, m.transferPath, m.transferErr = 0, 0, "", nil
 	m.transferUpload, m.transferRemoteTarget = false, nil
@@ -2241,6 +2388,10 @@ func (m *Model) messageTabIndex(message tea.Msg) (int, bool) {
 	case keyTestMsg:
 		return m.tabIndexByID(msg.tabID), true
 	case escapeTimeoutMsg:
+		return m.tabIndexByID(msg.tabID), true
+	case windowsRawInputTimeoutMsg:
+		return m.tabIndexByID(msg.tabID), true
+	case windowsCtrlTimeoutMsg:
 		return m.tabIndexByID(msg.tabID), true
 	case shellOutputMsg:
 		if m.conn == msg.source {
@@ -2338,6 +2489,8 @@ func (m *Model) disconnect(status string) {
 	m.clearTransferProgress()
 	m.picker, m.sftpDialog, m.sftpBusy, m.sftpOperationID = nil, nil, false, 0
 	m.escapePending = false
+	m.windowsRawInput, m.windowsRawID, m.windowsRawSFTP = "", 0, false
+	m.windowsCtrlWait = false
 	m.forwardModal, m.forwards = nil, nil
 	m.hostKeyPrompt = nil
 	m.reconnect = nil
@@ -2389,6 +2542,18 @@ func waitTransfer(updates <-chan transferProgressMsg) tea.Cmd {
 func escapeTimeoutCommand(tabID, id uint64) tea.Cmd {
 	return tea.Tick(700*time.Millisecond, func(time.Time) tea.Msg {
 		return escapeTimeoutMsg{id: id, tabID: tabID}
+	})
+}
+
+func windowsRawInputTimeoutCommand(tabID, id uint64) tea.Cmd {
+	return tea.Tick(windowsRawInputDelay, func(time.Time) tea.Msg {
+		return windowsRawInputTimeoutMsg{id: id, tabID: tabID}
+	})
+}
+
+func windowsCtrlTimeoutCommand(tabID, id uint64) tea.Cmd {
+	return tea.Tick(windowsCtrlDelay, func(time.Time) tea.Msg {
+		return windowsCtrlTimeoutMsg{id: id, tabID: tabID}
 	})
 }
 

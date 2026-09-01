@@ -19,6 +19,10 @@ func TestPlatformHintsDifferByOS(t *testing.T) {
 	if linux.newTab != "Ctrl+T" || linux.copy != "Ctrl+Shift+C" || linux.tabs != "Alt+←/→" || linux.ports != "Alt+P" {
 		t.Fatalf("Linux hints = %#v", linux)
 	}
+	windows := platformKeysForOS("windows")
+	if windows.focus != "Ctrl+Space" || windows.download != "Ctrl+D" || windows.upload != "Ctrl+U" {
+		t.Fatalf("Windows hints = %#v", windows)
+	}
 	if compactPlatformKeysForOS("darwin").tabs != "^⇧←/→" || compactPlatformKeysForOS("linux").newTab != "^T" {
 		t.Fatal("compact hints do not follow the target platform")
 	}
@@ -71,6 +75,9 @@ func TestMacNavigationShortcutsAvoidSystemControlAndOptionBindings(t *testing.T)
 	controlShiftSpace := tea.KeyPressMsg(tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl | tea.ModShift})
 	if matchesPlatformFocusShortcutForOS("darwin", controlSpace) || !matchesPlatformFocusShortcutForOS("darwin", controlShiftSpace) {
 		t.Fatal("macOS focus shortcut must be Ctrl+Shift+Space")
+	}
+	if !matchesPlatformFocusShortcutForOS("windows", controlSpace) || matchesPlatformFocusShortcutForOS("windows", controlShiftSpace) {
+		t.Fatal("Windows focus shortcut must be Ctrl+Space")
 	}
 }
 
