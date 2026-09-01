@@ -3,10 +3,12 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -373,6 +375,26 @@ func TestRightReleaseWithoutPressRequestsSystemClipboard(t *testing.T) {
 	}
 }
 
+func TestMouseWheelScrollsTerminalHistory(t *testing.T) {
+	m := &Model{
+		width: 100, height: 30, page: pageConnected, sftpHidden: true,
+		filesFocused: true, term: newTerminalScreen(98, 25),
+	}
+	var lines []string
+	for i := 0; i < 30; i++ {
+		lines = append(lines, fmt.Sprintf("line-%02d", i))
+	}
+	m.term.Feed([]byte(strings.Join(lines, "\r\n")))
+	_, _ = m.handleMouseWheel(tea.MouseWheelMsg(tea.Mouse{X: 2, Y: 3, Button: tea.MouseWheelUp}))
+	if m.term.ScrollOffset() != 3 || m.filesFocused {
+		t.Fatalf("wheel up: offset=%d filesFocused=%v", m.term.ScrollOffset(), m.filesFocused)
+	}
+	_, _ = m.handleMouseWheel(tea.MouseWheelMsg(tea.Mouse{X: 2, Y: 3, Button: tea.MouseWheelDown}))
+	if m.term.ScrollOffset() != 0 {
+		t.Fatalf("wheel down offset = %d", m.term.ScrollOffset())
+	}
+}
+
 func TestClipboardWriteFailureDoesNotClaimSuccess(t *testing.T) {
 	m := &Model{}
 	_, fallback := m.handleClipboardWriteResult(clipboardWriteResultMsg{text: "hello", err: errors.New("unavailable")})
@@ -710,6 +732,114 @@ func TestForwardModalFitsWindow(t *testing.T) {
 	}
 	if !strings.Contains(view, "postgres") || !strings.Contains(view, "Alt+P") {
 		t.Fatal("forward modal does not contain the configured tunnel and shortcut")
+	}
+}
+
+func TestBrokenShellStartsReconnectWithoutDiscardingTerminal(t *testing.T) {
+	connection := &remote.Connection{}
+	terminal := newTerminalScreen(60, 18)
+	terminal.Feed([]byte("old terminal output"))
+	m := &Model{
+		width: 80, height: 24, tabID: 7, page: pageConnected, conn: connection, term: terminal,
+		profile: config.Session{Name: "prod", Host: "server.example", Port: 22, User: "root"},
+	}
+	wantErr := errors.New("network is unreachable")
+	_, cmd := m.Update(shellOutputMsg{ok: false, err: wantErr, source: connection})
+	if cmd == nil || m.reconnect == nil || !m.reconnect.connecting || m.reconnect.attempt != 1 {
+		t.Fatalf("reconnect state = %#v, cmd nil = %v", m.reconnect, cmd == nil)
+	}
+	if m.page != pageConnected || m.conn != nil || m.term != terminal {
+		t.Fatalf("workspace was discarded: page=%v conn=%#v term preserved=%v", m.page, m.conn, m.term == terminal)
+	}
+	if !strings.Contains(terminal.String(), "SSH-соединение потеряно") {
+		t.Fatalf("terminal does not contain disconnect marker: %q", terminal.String())
+	}
+}
+
+func TestCleanShellExitDoesNotReconnect(t *testing.T) {
+	connection := &remote.Connection{}
+	m := &Model{page: pageConnected, conn: connection, term: newTerminalScreen(40, 10)}
+	_, cmd := m.Update(shellOutputMsg{ok: false, source: connection})
+	if cmd != nil || m.reconnect != nil || m.page != pageSessions {
+		t.Fatalf("clean exit state: page=%v reconnect=%#v cmd nil=%v", m.page, m.reconnect, cmd == nil)
+	}
+}
+
+func TestReconnectFailureSchedulesAnotherAttempt(t *testing.T) {
+	m := &Model{
+		width: 80, height: 24, tabID: 3, page: pageConnected,
+		profile:   config.Session{Host: "server.example", Port: 22, User: "root"},
+		reconnect: &reconnectState{generation: 9, attempt: 1, connecting: true},
+	}
+	_, cmd := m.Update(reconnectResultMsg{
+		tabID: 3, generation: 9, attempt: 1, err: errors.New("dial timeout"),
+	})
+	if cmd == nil || m.reconnect == nil || m.reconnect.connecting || m.reconnect.retryDelay != time.Second {
+		t.Fatalf("failed attempt state = %#v, cmd nil = %v", m.reconnect, cmd == nil)
+	}
+	if !strings.Contains(m.reconnect.lastError, "dial timeout") {
+		t.Fatalf("last error = %q", m.reconnect.lastError)
+	}
+}
+
+func TestSuccessfulReconnectRestoresSSHAndSFTP(t *testing.T) {
+	output := make(chan []byte)
+	connection := &remote.Connection{Home: "/root", Output: output}
+	m := &Model{
+		width: 80, height: 24, tabID: 3, page: pageConnected, term: newTerminalScreen(40, 10),
+		profile:   config.Session{Host: "server.example", Port: 22, User: "root"},
+		reconnect: &reconnectState{generation: 9, attempt: 2, connecting: true},
+	}
+	_, cmd := m.Update(reconnectResultMsg{tabID: 3, generation: 9, attempt: 2, conn: connection})
+	if cmd == nil || m.reconnect != nil || m.conn != connection || m.status != "SSH-соединение восстановлено" {
+		t.Fatalf("restored state: reconnect=%#v conn=%#v status=%q cmd nil=%v", m.reconnect, m.conn, m.status, cmd == nil)
+	}
+	if m.root == nil || m.root.Path != "/root" || m.term.CurrentDirectory() != "/root" {
+		t.Fatalf("restored paths: root=%#v cwd=%q", m.root, m.term.CurrentDirectory())
+	}
+	if !strings.Contains(m.term.String(), "SSH-соединение восстановлено") {
+		t.Fatalf("terminal does not contain restore marker: %q", m.term.String())
+	}
+}
+
+func TestReconnectCanBeCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &Model{
+		page: pageConnected, term: newTerminalScreen(40, 10),
+		reconnect: &reconnectState{generation: 1, attempt: 1, connecting: true, cancel: cancel},
+	}
+	_, cmd := m.handleReconnectKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc}))
+	if cmd != nil || m.reconnect != nil || m.page != pageSessions || m.status != "Переподключение отменено" {
+		t.Fatalf("cancelled state: page=%v reconnect=%#v status=%q", m.page, m.reconnect, m.status)
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("active reconnect attempt was not cancelled")
+	}
+}
+
+func TestReconnectModalFitsWindow(t *testing.T) {
+	m := &Model{
+		width: 80, height: 24, tabID: 1, page: pageConnected,
+		profile: config.Session{Name: "prod", Host: "server.example", User: "root"},
+		reconnect: &reconnectState{
+			generation: 1, attempt: 3, cause: "connection reset by peer",
+			lastError: "dial timeout", retryDelay: 4 * time.Second,
+		},
+	}
+	m.tabs = []*tabState{m.captureTab()}
+	view := m.viewContent()
+	if got := lipgloss.Width(view); got != 80 {
+		t.Fatalf("reconnect modal width = %d, want 80", got)
+	}
+	if got := lipgloss.Height(view); got != 24 {
+		t.Fatalf("reconnect modal height = %d, want 24", got)
+	}
+	for _, wanted := range []string{"SSH-соединение потеряно", "Попытка 3", "dial timeout", "Esc"} {
+		if !strings.Contains(view, wanted) {
+			t.Fatalf("reconnect modal does not contain %q", wanted)
+		}
 	}
 }
 

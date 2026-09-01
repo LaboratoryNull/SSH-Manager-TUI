@@ -25,7 +25,7 @@ var clickableHintLabels = []string{
 func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	mouse := msg.Mouse()
 	if mouse.Button == tea.MouseRight {
-		if m.page == pageConnected && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
+		if m.page == pageConnected && m.reconnect == nil && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
 			if _, ok := m.terminalPointAt(mouse, false); ok {
 				m.filesFocused = false
 				m.rightPasteDown = true
@@ -44,7 +44,7 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.page == pageConnected && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
+	if m.page == pageConnected && m.reconnect == nil && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
 		if point, ok := m.terminalPointAt(mouse, false); ok {
 			m.filesFocused = false
 			m.selection = &terminalSelection{anchor: point, head: point, dragging: true}
@@ -75,11 +75,35 @@ func (m *Model) handleMouseMotion(msg tea.MouseMotionMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	if m.page != pageConnected || m.term == nil || m.reconnect != nil || m.forwardModal != nil || m.sftpDialog != nil || m.picker != nil || m.hostKeyPrompt != nil {
+		return m, nil
+	}
+	mouse := msg.Mouse()
+	if _, ok := m.terminalPointAt(mouse, false); !ok {
+		return m, nil
+	}
+	lines := 0
+	switch mouse.Button {
+	case tea.MouseWheelUp:
+		lines = 3
+	case tea.MouseWheelDown:
+		lines = -3
+	default:
+		return m, nil
+	}
+	m.filesFocused = false
+	if m.term.ScrollLines(lines) {
+		m.selection = nil
+	}
+	return m, nil
+}
+
 func (m *Model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd) {
 	mouse := msg.Mouse()
 	if mouse.Button == tea.MouseRight || m.rightPasteDown {
 		m.rightPasteDown = false
-		if m.page == pageConnected && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
+		if m.page == pageConnected && m.reconnect == nil && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
 			if _, ok := m.terminalPointAt(mouse, false); ok {
 				m.filesFocused = false
 				return m, m.requestClipboardPaste()
@@ -88,7 +112,7 @@ func (m *Model) handleMouseRelease(msg tea.MouseReleaseMsg) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 	if m.selection == nil || !m.selection.dragging || m.term == nil {
-		if m.page == pageConnected && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
+		if m.page == pageConnected && m.reconnect == nil && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
 			m.focusSFTPAt(msg.Mouse())
 		}
 		return m, nil
@@ -175,7 +199,7 @@ func (m *Model) clickedHint(x, y int) string {
 	// In the normal connected view hints only occupy the tab bar and the last
 	// inner row. Restricting the scan prevents SSH output that happens to say
 	// "Enter" or "Esc" from becoming clickable.
-	if m.page == pageConnected && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil && y != 0 && y != m.height-2 && y != m.height-3 && y != m.height-4 {
+	if m.page == pageConnected && m.reconnect == nil && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil && y != 0 && y != m.height-2 && y != m.height-3 && y != m.height-4 {
 		return ""
 	}
 	plain := ansi.Strip(m.viewContent())

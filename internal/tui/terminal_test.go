@@ -155,3 +155,93 @@ func TestTerminalSelectionExtractsAndHighlightsText(t *testing.T) {
 		t.Fatalf("selection highlight is missing: %q", rendered)
 	}
 }
+
+func TestTerminalScrollbackKeepsHistoryAndAnchorsViewport(t *testing.T) {
+	s := newTerminalScreen(8, 3)
+	s.Feed([]byte("one\r\ntwo\r\nthree\r\nfour"))
+	if got := s.String(); got != "two\nthree\nfour" {
+		t.Fatalf("bottom view = %q", got)
+	}
+	if !s.ScrollLines(1) || s.ScrollOffset() != 1 {
+		t.Fatalf("scroll offset = %d", s.ScrollOffset())
+	}
+	if got := s.String(); got != "one\ntwo\nthree" {
+		t.Fatalf("history view = %q", got)
+	}
+
+	// Output received while reading history must not move the viewport.
+	s.Feed([]byte("\r\nfive"))
+	if got := s.String(); got != "one\ntwo\nthree" {
+		t.Fatalf("anchored history view = %q", got)
+	}
+	if s.ScrollOffset() != 2 {
+		t.Fatalf("anchored offset = %d", s.ScrollOffset())
+	}
+	if !s.ScrollToBottom() || s.String() != "three\nfour\nfive" {
+		t.Fatalf("bottom after reset = %q", s.String())
+	}
+}
+
+func TestTerminalScrollbackSelectionUsesVisibleHistory(t *testing.T) {
+	s := newTerminalScreen(8, 2)
+	s.Feed([]byte("first\r\nsecond\r\nthird"))
+	s.ScrollLines(1)
+	selection := &terminalSelection{anchor: terminalPoint{x: 0, y: 0}, head: terminalPoint{x: 4, y: 0}, moved: true}
+	if got := s.SelectionText(selection); got != "first" {
+		t.Fatalf("history selection = %q", got)
+	}
+}
+
+func TestTerminalAlternateScreenDoesNotPolluteScrollback(t *testing.T) {
+	s := newTerminalScreen(8, 2)
+	s.Feed([]byte("one\r\ntwo\r\nthree"))
+	historyBefore := len(s.history)
+	s.Feed([]byte("\x1b[?1049h1\r\n2\r\n3\r\n4"))
+	if s.ScrollLines(1) {
+		t.Fatal("alternate screen unexpectedly scrolled primary history")
+	}
+	s.Feed([]byte("\x1b[?1049l"))
+	if len(s.history) != historyBefore {
+		t.Fatalf("history length = %d, want %d", len(s.history), historyBefore)
+	}
+}
+
+func TestTerminalCSI3ClearsScrollbackOnly(t *testing.T) {
+	s := newTerminalScreen(8, 2)
+	s.Feed([]byte("one\r\ntwo\r\nthree"))
+	if len(s.history) == 0 {
+		t.Fatal("test setup did not create history")
+	}
+	s.Feed([]byte("\x1b[3J"))
+	if len(s.history) != 0 || s.ScrollOffset() != 0 {
+		t.Fatalf("history after CSI 3 J: lines=%d offset=%d", len(s.history), s.ScrollOffset())
+	}
+	if got := s.String(); got != "two\nthree" {
+		t.Fatalf("CSI 3 J cleared visible screen: %q", got)
+	}
+}
+
+func TestTerminalResizeKeepsRowsLostFromViewportInHistory(t *testing.T) {
+	s := newTerminalScreen(8, 3)
+	s.Feed([]byte("one\r\ntwo\r\nthree"))
+	s.Resize(8, 2)
+	if !s.ScrollLines(1) || s.String() != "one\ntwo" {
+		t.Fatalf("history after resize = %q, offset=%d", s.String(), s.ScrollOffset())
+	}
+}
+
+func TestTerminalEndSessionLeavesFullScreenModesWithoutClearingPrimaryScreen(t *testing.T) {
+	s := newTerminalScreen(16, 3)
+	s.Feed([]byte("shell prompt"))
+	s.Feed([]byte("\x1b[?1049h\x1b[?1h\x1b[?2004hfull screen"))
+	if !s.altActive || !s.applicationCursor || !s.bracketedPaste {
+		t.Fatal("test setup did not enable full-screen terminal modes")
+	}
+	s.endSession()
+	if s.altActive || s.applicationCursor || s.bracketedPaste {
+		t.Fatalf("full-screen modes remained enabled: alt=%v cursor=%v paste=%v", s.altActive, s.applicationCursor, s.bracketedPaste)
+	}
+	if !strings.Contains(s.String(), "shell prompt") {
+		t.Fatalf("primary screen was discarded: %q", s.String())
+	}
+}

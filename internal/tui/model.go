@@ -56,6 +56,7 @@ type keyTestMsg struct {
 type shellOutputMsg struct {
 	data   []byte
 	ok     bool
+	err    error
 	source *remote.Connection
 }
 type escapeTimeoutMsg struct {
@@ -112,6 +113,7 @@ type tabState struct {
 	forwardModal         *forwardModal
 	forwards             map[string]*forwardRuntime
 	hostKeyPrompt        *hostKeyPrompt
+	reconnect            *reconnectState
 }
 
 type Model struct {
@@ -122,6 +124,7 @@ type Model struct {
 	nextTabID           uint64
 	nextForwardID       uint64
 	nextSFTPOperationID uint64
+	nextReconnectID     uint64
 	tabID               uint64
 	page                page
 	width               int
@@ -174,6 +177,7 @@ type Model struct {
 	forwardModal         *forwardModal
 	forwards             map[string]*forwardRuntime
 	hostKeyPrompt        *hostKeyPrompt
+	reconnect            *reconnectState
 }
 
 var (
@@ -217,6 +221,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if index < 0 {
 			switch msg := message.(type) {
 			case connectMsg:
+				if msg.conn != nil {
+					msg.conn.Close()
+				}
+			case reconnectResultMsg:
 				if msg.conn != nil {
 					msg.conn.Close()
 				}
@@ -288,6 +296,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if !msg.ok {
+			if msg.err != nil {
+				return m, m.beginReconnect(msg.err)
+			}
 			m.disconnect("SSH-сессия завершена")
 			return m, nil
 		}
@@ -299,6 +310,10 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, waitShellOutput(m.conn)
+	case reconnectTickMsg:
+		return m, m.handleReconnectTick(msg)
+	case reconnectResultMsg:
+		return m, m.handleReconnectResult(msg)
 	case dirLoadedMsg:
 		if m.page != pageConnected || !treeContains(m.root, msg.node) {
 			return m, nil
@@ -432,6 +447,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouseMotion(msg)
 	case tea.MouseReleaseMsg:
 		return m.handleMouseRelease(msg)
+	case tea.MouseWheelMsg:
+		return m.handleMouseWheel(msg)
 	}
 	if m.sftpDialog != nil && m.sftpDialog.action != sftpActionDelete {
 		var cmd tea.Cmd
@@ -465,6 +482,9 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.hostKeyPrompt != nil {
 		return m.handleHostKeyPrompt(key)
+	}
+	if m.reconnect != nil {
+		return m.handleReconnectKey(key)
 	}
 	if m.profileManager != nil {
 		return m.handleProfileManagerKey(key)
@@ -795,6 +815,7 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	data := keyBytes(key)
 	if m.term != nil {
+		m.term.ScrollToBottom()
 		data = m.term.KeyBytes(key)
 	}
 	if len(data) == 0 {
@@ -821,6 +842,7 @@ func (m *Model) handleConnectedPaste(content string) (tea.Model, tea.Cmd) {
 	}
 	data := []byte(content)
 	if m.term != nil {
+		m.term.ScrollToBottom()
 		data = m.term.PasteBytes(content)
 	}
 	if err := m.conn.Send(data); err != nil {
@@ -942,7 +964,9 @@ func (m *Model) viewContent() string {
 	case pageForm:
 		content = m.formView()
 	case pageConnected:
-		if m.forwardModal != nil {
+		if m.reconnect != nil {
+			content = m.reconnectView()
+		} else if m.forwardModal != nil {
 			content = m.forwardView()
 		} else if m.sftpDialog != nil {
 			content = m.sftpActionView()
@@ -986,18 +1010,22 @@ func (m *Model) tabsView() string {
 
 func (m *Model) tabTitle(index int) string {
 	state := m.tabs[index]
-	currentPage, profile, connecting := state.page, state.profile, state.connecting
+	currentPage, profile, connecting, reconnecting := state.page, state.profile, state.connecting, state.reconnect != nil
 	if index == m.activeTab {
-		currentPage, profile, connecting = m.page, m.profile, m.connecting
+		currentPage, profile, connecting, reconnecting = m.page, m.profile, m.connecting, m.reconnect != nil
 	}
 	if connecting {
 		return "Подключение…"
 	}
 	if currentPage == pageConnected {
-		if profile.Name != "" {
-			return ellipsize(profile.Name, 18)
+		prefix := ""
+		if reconnecting {
+			prefix = "↻ "
 		}
-		return ellipsize(profile.Host, 18)
+		if profile.Name != "" {
+			return prefix + ellipsize(profile.Name, 18-lipgloss.Width(prefix))
+		}
+		return prefix + ellipsize(profile.Host, 18-lipgloss.Width(prefix))
 	}
 	if index == m.activeTab && m.profileManager != nil {
 		return "Профили"
@@ -1174,6 +1202,9 @@ func (m *Model) connectedView() string {
 		consoleBorder = accent
 	}
 	consoleTitle := fmt.Sprintf(" ● SSH  %s@%s • Esc q: назад ", m.profile.User, m.profile.Host)
+	if m.term != nil && m.term.ScrollOffset() > 0 {
+		consoleTitle += fmt.Sprintf(" • история: −%d ", m.term.ScrollOffset())
+	}
 	if m.status != "" && m.status != "Подключено" {
 		consoleTitle += " • " + m.status
 	}
@@ -1941,7 +1972,7 @@ func (m *Model) captureTab() *tabState {
 		transferLastDone: m.transferLastDone, transferSpeed: m.transferSpeed,
 		transferCancel:       m.transferCancel,
 		transferRemoteTarget: m.transferRemoteTarget, forwardModal: m.forwardModal, forwards: m.forwards,
-		hostKeyPrompt: m.hostKeyPrompt,
+		hostKeyPrompt: m.hostKeyPrompt, reconnect: m.reconnect,
 	}
 }
 
@@ -1972,6 +2003,7 @@ func (m *Model) restoreTab(index int) {
 	m.transferRemoteTarget = state.transferRemoteTarget
 	m.forwardModal, m.forwards = state.forwardModal, state.forwards
 	m.hostKeyPrompt = state.hostKeyPrompt
+	m.reconnect = state.reconnect
 }
 
 func (m *Model) resetTab(id uint64) {
@@ -1995,6 +2027,7 @@ func (m *Model) resetTab(id uint64) {
 	m.transferStarted, m.transferLastDone, m.transferSpeed = time.Time{}, 0, 0
 	m.forwardModal, m.forwards = nil, nil
 	m.hostKeyPrompt = nil
+	m.reconnect = nil
 	m.resetForm()
 }
 
@@ -2023,6 +2056,9 @@ func closeTabResources(state *tabState) {
 	}
 	if state.transferCancel != nil {
 		state.transferCancel()
+	}
+	if state.reconnect != nil && state.reconnect.cancel != nil {
+		state.reconnect.cancel()
 	}
 	if state.conn != nil {
 		state.conn.Close()
@@ -2077,6 +2113,10 @@ func (m *Model) messageTabIndex(message tea.Msg) (int, bool) {
 			}
 		}
 		return -1, true
+	case reconnectTickMsg:
+		return m.tabIndexByID(msg.tabID), true
+	case reconnectResultMsg:
+		return m.tabIndexByID(msg.tabID), true
 	case dirLoadedMsg:
 		if treeContains(m.root, msg.node) {
 			return m.activeTab, true
@@ -2151,6 +2191,9 @@ func (m *Model) disconnect(status string) {
 	if m.conn != nil {
 		m.conn.Close()
 	}
+	if m.reconnect != nil && m.reconnect.cancel != nil {
+		m.reconnect.cancel()
+	}
 	m.conn, m.root, m.visible, m.term = nil, nil, nil, nil
 	m.selection, m.clipboardPaste, m.rightPasteDown = nil, false, false
 	m.clearTransferProgress()
@@ -2158,6 +2201,7 @@ func (m *Model) disconnect(status string) {
 	m.escapePending = false
 	m.forwardModal, m.forwards = nil, nil
 	m.hostKeyPrompt = nil
+	m.reconnect = nil
 	m.page, m.status = pageSessions, status
 }
 
@@ -2188,7 +2232,7 @@ func testKeyCommand(tabID uint64, profile config.Session) tea.Cmd {
 func waitShellOutput(conn *remote.Connection) tea.Cmd {
 	return func() tea.Msg {
 		data, ok := <-conn.Output
-		return shellOutputMsg{data: data, ok: ok, source: conn}
+		return shellOutputMsg{data: data, ok: ok, err: conn.TerminalError(), source: conn}
 	}
 }
 

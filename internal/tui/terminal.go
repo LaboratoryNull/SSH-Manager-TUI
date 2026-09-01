@@ -88,6 +88,8 @@ type terminalScreen struct {
 	cx, cy            int
 	savedX, savedY    int
 	rows              [][]terminalCell
+	history           [][]terminalCell
+	scrollOffset      int
 	scrollTop         int
 	scrollBottom      int
 	state             int
@@ -110,6 +112,8 @@ type terminalScreen struct {
 	currentDir        string
 }
 
+const terminalHistoryLimit = 10_000
+
 func newTerminalScreen(w, h int) *terminalScreen {
 	t := &terminalScreen{wrap: true, cursorVisible: true}
 	t.Resize(w, h)
@@ -123,7 +127,15 @@ func (t *terminalScreen) Resize(w, h int) {
 	if h < 1 {
 		h = 1
 	}
+	if !t.altActive && len(t.rows) > h {
+		t.appendHistory(t.rows[:len(t.rows)-h])
+	} else if t.altActive && t.primary != nil && len(t.primary.rows) > h {
+		t.appendHistory(t.primary.rows[:len(t.primary.rows)-h])
+	}
 	t.rows, t.cx, t.cy = resizeCells(t.rows, w, h, t.cx, t.cy)
+	for i := range t.history {
+		t.history[i] = resizeCellRow(t.history[i], w)
+	}
 	if t.primary != nil {
 		t.primary.rows, t.primary.cx, t.primary.cy = resizeCells(t.primary.rows, w, h, t.primary.cx, t.primary.cy)
 		t.primary.scrollTop, t.primary.scrollBottom = 0, h-1
@@ -131,6 +143,13 @@ func (t *terminalScreen) Resize(w, h int) {
 	t.w, t.h = w, h
 	t.scrollTop, t.scrollBottom = 0, h-1
 	t.cx, t.cy = clamp(t.cx, 0, w-1), clamp(t.cy, 0, h-1)
+	t.scrollOffset = clamp(t.scrollOffset, 0, len(t.history))
+}
+
+func resizeCellRow(old []terminalCell, width int) []terminalCell {
+	row := blankCellRow(width, terminalStyle{})
+	copy(row, old)
+	return row
 }
 
 func resizeCells(old [][]terminalCell, w, h, cx, cy int) ([][]terminalCell, int, int) {
@@ -336,7 +355,7 @@ func (t *terminalScreen) KeyBytes(key tea.KeyPressMsg) []byte {
 
 func (t *terminalScreen) selectionPoint(point terminalPoint) terminalPoint {
 	point.x, point.y = clamp(point.x, 0, t.w-1), clamp(point.y, 0, t.h-1)
-	if t.rows[point.y][point.x].continuation && point.x > 0 {
+	if t.visibleRows()[point.y][point.x].continuation && point.x > 0 {
 		point.x--
 	}
 	return point
@@ -348,6 +367,7 @@ func (t *terminalScreen) SelectionText(selection *terminalSelection) string {
 	}
 	start, end := selection.bounds()
 	start, end = t.selectionPoint(start), t.selectionPoint(end)
+	rows := t.visibleRows()
 	var lines []string
 	for y := start.y; y <= end.y; y++ {
 		from, to := 0, t.w-1
@@ -359,7 +379,7 @@ func (t *terminalScreen) SelectionText(selection *terminalSelection) string {
 		}
 		var line strings.Builder
 		for x := from; x <= to; x++ {
-			cell := t.rows[y][x]
+			cell := rows[y][x]
 			if !cell.continuation {
 				line.WriteRune(cell.rune)
 			}
@@ -430,9 +450,27 @@ func (t *terminalScreen) scrollUp(top, bottom, count int) {
 		return
 	}
 	count = min(max(1, count), bottom-top+1)
+	if !t.altActive && top == 0 && bottom == t.h-1 {
+		t.appendHistory(t.rows[:count])
+	}
 	copy(t.rows[top:bottom-count+1], t.rows[top+count:bottom+1])
 	for y := bottom - count + 1; y <= bottom; y++ {
 		t.rows[y] = blankCellRow(t.w, t.style)
+	}
+}
+
+func (t *terminalScreen) appendHistory(rows [][]terminalCell) {
+	if len(rows) == 0 {
+		return
+	}
+	for _, row := range rows {
+		t.history = append(t.history, append([]terminalCell(nil), row...))
+	}
+	if overflow := len(t.history) - terminalHistoryLimit; overflow > 0 {
+		t.history = append([][]terminalCell(nil), t.history[overflow:]...)
+	}
+	if t.scrollOffset > 0 {
+		t.scrollOffset = min(len(t.history), t.scrollOffset+len(rows))
 	}
 }
 
@@ -563,8 +601,11 @@ func (t *terminalScreen) eraseDisplay(mode int) {
 			t.eraseLine(y, 0, t.w)
 		}
 		t.eraseLine(t.cy, 0, t.cx+1)
-	case 2, 3:
+	case 2:
 		t.clearAll()
+	case 3:
+		t.history = nil
+		t.scrollOffset = 0
 	}
 }
 
@@ -625,6 +666,7 @@ func (t *terminalScreen) enterAltScreen() {
 	}
 	t.cx, t.cy, t.savedX, t.savedY = 0, 0, 0, 0
 	t.scrollTop, t.scrollBottom, t.altActive = 0, t.h-1, true
+	t.scrollOffset = 0
 }
 
 func (t *terminalScreen) exitAltScreen() {
@@ -730,12 +772,80 @@ func (t *terminalScreen) reset() {
 	t.g0Graphics, t.g1Graphics, t.useG1 = false, false, false
 	t.scrollTop, t.scrollBottom = 0, t.h-1
 	t.cx, t.cy, t.savedX, t.savedY = 0, 0, 0, 0
+	t.history = nil
+	t.scrollOffset = 0
 	t.clearAll()
 }
 
+func (t *terminalScreen) ScrollLines(lines int) bool {
+	if t == nil || t.altActive || lines == 0 {
+		return false
+	}
+	previous := t.scrollOffset
+	t.scrollOffset = clamp(t.scrollOffset+lines, 0, len(t.history))
+	return previous != t.scrollOffset
+}
+
+func (t *terminalScreen) ScrollToBottom() bool {
+	if t == nil || t.scrollOffset == 0 {
+		return false
+	}
+	t.scrollOffset = 0
+	return true
+}
+
+func (t *terminalScreen) ScrollOffset() int {
+	if t == nil {
+		return 0
+	}
+	return t.scrollOffset
+}
+
+// endSession returns the emulator to ordinary shell input modes without
+// clearing the primary screen or its scrollback. A broken connection may not
+// deliver the escape sequences that htop, mc, vim and similar programs use to
+// leave the alternate screen and disable application cursor mode.
+func (t *terminalScreen) endSession() {
+	if t == nil {
+		return
+	}
+	if t.altActive {
+		t.exitAltScreen()
+	}
+	t.state = 0
+	t.csi.Reset()
+	t.osc.Reset()
+	t.utf8Buffer = nil
+	t.style = terminalStyle{}
+	t.wrap, t.originMode, t.applicationCursor, t.cursorVisible = true, false, false, true
+	t.g0Graphics, t.g1Graphics, t.useG1 = false, false, false
+	t.bracketedPaste = false
+	t.scrollTop, t.scrollBottom = 0, t.h-1
+	t.scrollOffset = 0
+	t.responses = nil
+}
+
+func (t *terminalScreen) visibleRows() [][]terminalCell {
+	if t.scrollOffset == 0 || len(t.history) == 0 || t.altActive {
+		return t.rows
+	}
+	start := len(t.history) - t.scrollOffset
+	visible := make([][]terminalCell, t.h)
+	for y := range visible {
+		index := start + y
+		if index < len(t.history) {
+			visible[y] = t.history[index]
+		} else {
+			visible[y] = t.rows[index-len(t.history)]
+		}
+	}
+	return visible
+}
+
 func (t *terminalScreen) String() string {
-	lines := make([]string, len(t.rows))
-	for y, row := range t.rows {
+	rows := t.visibleRows()
+	lines := make([]string, len(rows))
+	for y, row := range rows {
 		var line strings.Builder
 		for _, cell := range row {
 			if !cell.continuation {
@@ -755,7 +865,8 @@ func (t *terminalScreen) RenderANSISelection(selection *terminalSelection) strin
 	var out strings.Builder
 	active := terminalStyle{}
 	styled := false
-	for y, row := range t.rows {
+	rows := t.visibleRows()
+	for y, row := range rows {
 		for x, cell := range row {
 			if cell.continuation {
 				continue
@@ -766,7 +877,7 @@ func (t *terminalScreen) RenderANSISelection(selection *terminalSelection) strin
 				style.fg = terminalColor{mode: 2, a: 17, b: 17, c: 27}
 				style.bg = terminalColor{mode: 2, a: 125, b: 86, c: 244}
 				style.inverse = false
-			} else if t.cursorVisible && y == t.cy && x == min(t.cx, t.w-1) {
+			} else if t.scrollOffset == 0 && t.cursorVisible && y == t.cy && x == min(t.cx, t.w-1) {
 				style.inverse = !style.inverse
 			}
 			if !styled || style != active {
@@ -777,7 +888,7 @@ func (t *terminalScreen) RenderANSISelection(selection *terminalSelection) strin
 		}
 		out.WriteString("\x1b[0m")
 		styled, active = false, terminalStyle{}
-		if y+1 < len(t.rows) {
+		if y+1 < len(rows) {
 			out.WriteByte('\n')
 		}
 	}

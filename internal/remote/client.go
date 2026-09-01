@@ -29,8 +29,11 @@ type Connection struct {
 	Home    string
 
 	closeOnce  sync.Once
+	netConn    net.Conn
 	input      chan []byte
 	done       chan struct{}
+	failureMu  sync.Mutex
+	failure    error
 	forwardsMu sync.Mutex
 	forwards   map[*Forward]struct{}
 }
@@ -62,7 +65,41 @@ func (c *Connection) Close() {
 		if c.SSH != nil {
 			_ = c.SSH.Close()
 		}
+		if c.netConn != nil {
+			_ = c.netConn.Close()
+		}
 	})
+}
+
+// TerminalError reports why the interactive shell stopped. A nil value means
+// that the remote shell exited normally (for example after the user typed
+// "exit"). Transport and keepalive failures are retained so the UI can offer
+// to reconnect instead of treating them as an intentional logout.
+func (c *Connection) TerminalError() error {
+	c.failureMu.Lock()
+	defer c.failureMu.Unlock()
+	return c.failure
+}
+
+func (c *Connection) setTerminalError(err error) {
+	if err == nil {
+		return
+	}
+	c.failureMu.Lock()
+	if c.failure == nil {
+		c.failure = err
+	}
+	c.failureMu.Unlock()
+}
+
+func (c *Connection) fail(err error) {
+	c.setTerminalError(err)
+	// Closing the underlying socket interrupts a blocked SSH request and all
+	// stdout/SFTP reads. Connection.Close is then performed by the UI when it
+	// receives the closed output channel.
+	if c.netConn != nil {
+		_ = c.netConn.Close()
+	}
 }
 
 func (c *Connection) Send(data []byte) error {
@@ -99,13 +136,23 @@ func Connect(ctx context.Context, profile config.Session, width, height int, key
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", address, err)
 	}
+	stopContextClose := context.AfterFunc(ctx, func() { _ = netConn.Close() })
+	defer stopContextClose()
+	handshakeDeadline := time.Now().Add(12 * time.Second)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(handshakeDeadline) {
+		handshakeDeadline = deadline
+	}
+	if err := netConn.SetDeadline(handshakeDeadline); err != nil {
+		netConn.Close()
+		return nil, fmt.Errorf("set SSH handshake deadline: %w", err)
+	}
 	conn, chans, reqs, err := ssh.NewClientConn(netConn, address, clientConfig)
 	if err != nil {
 		netConn.Close()
 		return nil, fmt.Errorf("SSH handshake: %w", err)
 	}
 	sshClient := ssh.NewClient(conn, chans, reqs)
-	result := &Connection{SSH: sshClient, input: make(chan []byte, 256), done: make(chan struct{})}
+	result := &Connection{SSH: sshClient, netConn: netConn, input: make(chan []byte, 256), done: make(chan struct{})}
 	fail := func(err error) (*Connection, error) {
 		result.Close()
 		return nil, err
@@ -160,11 +207,18 @@ func Connect(ctx context.Context, profile config.Session, width, height int, key
 	if err := session.Shell(); err != nil {
 		return fail(fmt.Errorf("start shell: %w", err))
 	}
+	if err := netConn.SetDeadline(time.Time{}); err != nil {
+		return fail(fmt.Errorf("clear SSH setup deadline: %w", err))
+	}
+	if !stopContextClose() {
+		return fail(fmt.Errorf("SSH setup: %w", context.Cause(ctx)))
+	}
 	result.Stdin = stdin
 	go result.writeInput()
 	out := make(chan []byte, 128)
 	result.Output = out
-	go mergeOutput(out, stdout, stderr)
+	go result.monitorOutput(out, stdout, stderr)
+	go result.keepalive()
 	return result, nil
 }
 
@@ -197,6 +251,7 @@ func (c *Connection) writeInput() {
 		select {
 		case data := <-c.input:
 			if _, err := c.Stdin.Write(data); err != nil {
+				c.fail(fmt.Errorf("write SSH input: %w", err))
 				return
 			}
 		case <-c.done:
@@ -212,7 +267,7 @@ func (c *Connection) Resize(width, height int) error {
 	return c.Session.WindowChange(height, width)
 }
 
-func mergeOutput(out chan<- []byte, readers ...io.Reader) {
+func (c *Connection) monitorOutput(out chan<- []byte, readers ...io.Reader) {
 	var wg sync.WaitGroup
 	for _, reader := range readers {
 		wg.Add(1)
@@ -226,13 +281,56 @@ func mergeOutput(out chan<- []byte, readers ...io.Reader) {
 					out <- chunk
 				}
 				if err != nil {
+					if !errors.Is(err, io.EOF) {
+						c.setTerminalError(fmt.Errorf("read SSH output: %w", err))
+					}
 					return
 				}
 			}
 		}(reader)
 	}
+	waitErr := c.Session.Wait()
 	wg.Wait()
+	// ssh.ExitError is an exit status or signal produced by the remote command,
+	// not a broken transport. ExitMissingError and all other errors mean that
+	// the shell disappeared without a proper exit status and should reconnect.
+	if waitErr != nil {
+		var exitErr *ssh.ExitError
+		if !errors.As(waitErr, &exitErr) {
+			c.setTerminalError(fmt.Errorf("SSH session: %w", waitErr))
+		}
+	}
 	close(out)
+}
+
+const (
+	keepaliveInterval = 10 * time.Second
+	keepaliveTimeout  = 5 * time.Second
+)
+
+func (c *Connection) keepalive() {
+	if c.SSH == nil || c.netConn == nil || c.done == nil {
+		return
+	}
+	ticker := time.NewTicker(keepaliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+			if err := c.netConn.SetDeadline(time.Now().Add(keepaliveTimeout)); err != nil {
+				c.fail(fmt.Errorf("set SSH keepalive deadline: %w", err))
+				return
+			}
+			_, _, err := c.SSH.SendRequest("keepalive@openssh.com", true, nil)
+			_ = c.netConn.SetDeadline(time.Time{})
+			if err != nil {
+				c.fail(fmt.Errorf("SSH keepalive: %w", err))
+				return
+			}
+		}
+	}
 }
 
 func authMethods(profile config.Session, keyOnly bool) ([]ssh.AuthMethod, error) {

@@ -52,3 +52,28 @@ func TestHostKeyCallbackRequiresConfirmationForUnknownAndChangedKeys(t *testing.
 		t.Fatalf("changed key error = %#v", err)
 	}
 }
+
+func TestConnectionKeepsFirstTerminalFailure(t *testing.T) {
+	connection := &Connection{}
+	first := errors.New("keepalive timeout")
+	connection.setTerminalError(first)
+	connection.setTerminalError(errors.New("session closed"))
+	if got := connection.TerminalError(); !errors.Is(got, first) {
+		t.Fatalf("terminal error = %v, want first failure %v", got, first)
+	}
+}
+
+func TestConnectionFailureClosesTransport(t *testing.T) {
+	client, server := net.Pipe()
+	defer server.Close()
+	connection := &Connection{netConn: client}
+	wantErr := errors.New("connection lost")
+	connection.fail(wantErr)
+	if got := connection.TerminalError(); !errors.Is(got, wantErr) {
+		t.Fatalf("terminal error = %v, want %v", got, wantErr)
+	}
+	buffer := make([]byte, 1)
+	if _, err := server.Read(buffer); err == nil {
+		t.Fatal("transport remained open after terminal failure")
+	}
+}
