@@ -62,10 +62,7 @@ func runUpdate(arguments []string) int {
 			return 2
 		}
 	}
-	manifestURL := strings.TrimSpace(os.Getenv("SSHM_UPDATE_URL"))
-	if manifestURL == "" {
-		manifestURL = updateManifestURL
-	}
+	manifestURL := resolvedUpdateManifestURL()
 	if manifestURL == "" {
 		fmt.Fprintln(os.Stderr, "sshm update: URL обновлений не настроен")
 		fmt.Fprintln(os.Stderr, "задайте SSHM_UPDATE_URL или соберите приложение с make UPDATE_URL=https://…")
@@ -88,13 +85,24 @@ func runUpdate(arguments []string) int {
 	}
 	switch {
 	case result.Updated:
-		fmt.Printf("sshm обновлён: %s → %s. Перезапустите приложение.\n", result.CurrentVersion, result.LatestVersion)
+		if result.Deferred {
+			fmt.Printf("sshm %s загружен. Приложение будет перезапущено автоматически.\n", result.LatestVersion)
+		} else {
+			fmt.Printf("sshm обновлён: %s → %s. Перезапустите приложение.\n", result.CurrentVersion, result.LatestVersion)
+		}
 	case result.Available:
 		fmt.Printf("Доступно обновление sshm: %s → %s\n", result.CurrentVersion, result.LatestVersion)
 	default:
 		fmt.Printf("Установлена актуальная версия sshm %s\n", result.CurrentVersion)
 	}
 	return 0
+}
+
+func resolvedUpdateManifestURL() string {
+	if value := strings.TrimSpace(os.Getenv("SSHM_UPDATE_URL")); value != "" {
+		return value
+	}
+	return updateManifestURL
 }
 
 func printHelp() {
@@ -116,7 +124,11 @@ func runTUI() {
 		os.Exit(1)
 	}
 
-	model, err := tui.New(store)
+	model, err := tui.New(store, tui.AppInfo{
+		Version:           version,
+		UpdateManifestURL: resolvedUpdateManifestURL(),
+		UpdateToken:       strings.TrimSpace(os.Getenv("SSHM_UPDATE_TOKEN")),
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "startup error:", err)
 		os.Exit(1)

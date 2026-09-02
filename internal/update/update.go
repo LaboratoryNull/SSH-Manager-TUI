@@ -51,6 +51,7 @@ type Result struct {
 	LatestVersion  string
 	Available      bool
 	Updated        bool
+	Deferred       bool
 }
 
 func Run(ctx context.Context, options Options) (Result, error) {
@@ -102,10 +103,12 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if resolved, resolveErr := filepath.EvalSymlinks(target); resolveErr == nil {
 		target = resolved
 	}
-	if err := replaceExecutable(ctx, client, manifestURL.Hostname(), options.Token, artifactURL, artifact, target); err != nil {
+	deferred, err := replaceExecutable(ctx, client, manifestURL.Hostname(), options.Token, artifactURL, artifact, target)
+	if err != nil {
 		return result, err
 	}
 	result.Updated = true
+	result.Deferred = deferred
 	return result, nil
 }
 
@@ -138,56 +141,61 @@ func fetchManifest(ctx context.Context, client *http.Client, manifestURL *url.UR
 	return manifest, nil
 }
 
-func replaceExecutable(ctx context.Context, client *http.Client, manifestHost, token string, artifactURL *url.URL, artifact Artifact, target string) error {
+func replaceExecutable(ctx context.Context, client *http.Client, manifestHost, token string, artifactURL *url.URL, artifact Artifact, target string) (bool, error) {
 	wantHash := strings.ToLower(strings.TrimSpace(artifact.SHA256))
 	decodedHash, err := hex.DecodeString(wantHash)
 	if err != nil || len(decodedHash) != sha256.Size {
-		return fmt.Errorf("artifact has invalid SHA-256 checksum")
+		return false, fmt.Errorf("artifact has invalid SHA-256 checksum")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, artifactURL.String(), nil)
 	if err != nil {
-		return fmt.Errorf("create artifact request: %w", err)
+		return false, fmt.Errorf("create artifact request: %w", err)
 	}
 	if strings.EqualFold(artifactURL.Hostname(), manifestHost) {
 		setHeaders(request, token)
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("download update: %w", err)
+		return false, fmt.Errorf("download update: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("download update: HTTP %s", response.Status)
+		return false, fmt.Errorf("download update: HTTP %s", response.Status)
 	}
 
 	info, err := os.Stat(target)
 	if err != nil {
-		return fmt.Errorf("inspect current executable: %w", err)
+		return false, fmt.Errorf("inspect current executable: %w", err)
 	}
 	directory := filepath.Dir(target)
 	temporary, err := os.CreateTemp(directory, ".sshm-update-*")
 	if err != nil {
-		return fmt.Errorf("create update beside %s: %w", target, err)
+		return false, fmt.Errorf("create update beside %s: %w", target, err)
 	}
 	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
+	keepTemporary := false
+	defer func() {
+		if !keepTemporary {
+			_ = os.Remove(temporaryName)
+		}
+	}()
 	hash := sha256.New()
 	written, copyErr := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(response.Body, maxBinarySize+1))
 	if copyErr != nil {
 		temporary.Close()
-		return fmt.Errorf("write update: %w", copyErr)
+		return false, fmt.Errorf("write update: %w", copyErr)
 	}
 	if written > maxBinarySize {
 		temporary.Close()
-		return fmt.Errorf("update exceeds %d MiB limit", maxBinarySize>>20)
+		return false, fmt.Errorf("update exceeds %d MiB limit", maxBinarySize>>20)
 	}
 	if artifact.Size > 0 && written != artifact.Size {
 		temporary.Close()
-		return fmt.Errorf("update size is %d bytes, expected %d", written, artifact.Size)
+		return false, fmt.Errorf("update size is %d bytes, expected %d", written, artifact.Size)
 	}
 	if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), wantHash) {
 		temporary.Close()
-		return errors.New("downloaded update failed SHA-256 verification")
+		return false, errors.New("downloaded update failed SHA-256 verification")
 	}
 	mode := info.Mode().Perm()
 	if mode&0o111 == 0 {
@@ -195,23 +203,28 @@ func replaceExecutable(ctx context.Context, client *http.Client, manifestHost, t
 	}
 	if err := temporary.Chmod(mode); err != nil {
 		temporary.Close()
-		return fmt.Errorf("set update permissions: %w", err)
+		return false, fmt.Errorf("set update permissions: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
 		temporary.Close()
-		return fmt.Errorf("sync update: %w", err)
+		return false, fmt.Errorf("sync update: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close update: %w", err)
+		return false, fmt.Errorf("close update: %w", err)
 	}
-	if err := os.Rename(temporaryName, target); err != nil {
-		return fmt.Errorf("replace %s: %w", target, err)
+	deferred, err := installExecutable(temporaryName, target)
+	if err != nil {
+		return false, fmt.Errorf("replace %s: %w", target, err)
+	}
+	keepTemporary = deferred
+	if deferred {
+		return true, nil
 	}
 	if directoryHandle, err := os.Open(directory); err == nil {
 		_ = directoryHandle.Sync()
 		_ = directoryHandle.Close()
 	}
-	return nil
+	return false, nil
 }
 
 func secureURL(value string) (*url.URL, error) {

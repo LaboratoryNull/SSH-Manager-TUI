@@ -140,6 +140,10 @@ type tabState struct {
 type Model struct {
 	store               *config.Store
 	config              config.Config
+	appVersion          string
+	updateManifestURL   string
+	updateToken         string
+	updateDialog        *updateDialog
 	tabs                []*tabState
 	activeTab           int
 	nextTabID           uint64
@@ -230,7 +234,13 @@ var (
 	sizeStyle     = lipgloss.NewStyle().Foreground(warningColor).Background(surface)
 )
 
-func New(store *config.Store) (*Model, error) {
+type AppInfo struct {
+	Version           string
+	UpdateManifestURL string
+	UpdateToken       string
+}
+
+func New(store *config.Store, application ...AppInfo) (*Model, error) {
 	cfg, err := store.Load()
 	if err != nil {
 		return nil, err
@@ -238,6 +248,11 @@ func New(store *config.Store) (*Model, error) {
 	cfg.Theme = normalizedThemeID(cfg.Theme)
 	applyTheme(cfg.Theme)
 	m := &Model{store: store, config: cfg, page: pageSessions, filesFocused: false, sftpHidden: true}
+	if len(application) > 0 {
+		m.appVersion = strings.TrimSpace(application[0].Version)
+		m.updateManifestURL = strings.TrimSpace(application[0].UpdateManifestURL)
+		m.updateToken = strings.TrimSpace(application[0].UpdateToken)
+	}
 	m.nextTabID, m.tabID = 1, 1
 	m.resetForm()
 	if order := m.sessionOrder(); len(order) > 0 {
@@ -247,7 +262,12 @@ func New(store *config.Store) (*Model, error) {
 	return m, nil
 }
 
-func (m *Model) Init() tea.Cmd { return textinput.Blink }
+func (m *Model) Init() tea.Cmd {
+	if command := m.checkForUpdate(); command != nil {
+		return tea.Batch(textinput.Blink, command)
+	}
+	return textinput.Blink
+}
 
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if index, targeted := m.messageTabIndex(message); targeted {
@@ -273,6 +293,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch msg := message.(type) {
+	case updateCheckMsg:
+		return m.handleUpdateCheck(msg)
+	case updateInstallMsg:
+		return m.handleUpdateInstall(msg)
+	case elevatedUpdateFinishedMsg:
+		return m.handleElevatedUpdateFinished(msg)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		if m.page == pageConnected {
@@ -483,6 +509,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.updateDialog != nil {
+			return m.handleUpdateDialogKey(msg)
+		}
 		if runtime.GOOS == "windows" {
 			if cmd, consumed := m.handleWindowsAmbiguousCtrl(msg); consumed {
 				return m, cmd
@@ -510,6 +539,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleConnectedPaste(msg.Content)
 		}
 	case tea.MouseClickMsg:
+		if m.updateDialog != nil {
+			return m.handleUpdateDialogClick(msg)
+		}
 		return m.handleMouseClick(msg)
 	case tea.MouseMotionMsg:
 		return m.handleMouseMotion(msg)
@@ -1166,6 +1198,9 @@ func (m *Model) viewContent() string {
 	if m.width == 0 {
 		return "Запуск ssh-manager…"
 	}
+	if m.updateDialog != nil {
+		return m.tabsView() + "\n" + m.updateDialogView()
+	}
 	var content string
 	if m.hostKeyPrompt != nil {
 		return m.tabsView() + "\n" + m.hostKeyPromptView()
@@ -1234,6 +1269,9 @@ func (m *Model) tabBarHelp() string {
 	help := renderHints([2]string{keys.newTab, "+"}, [2]string{keys.closeTab, "×"}, [2]string{keys.tabs, "вкладки"})
 	if m.themeHintVisible() {
 		help += "  " + renderHints([2]string{"t", "тема: " + currentThemeName(m.config.Theme)})
+	}
+	if m.appVersion != "" {
+		help = lipgloss.NewStyle().Foreground(muted).Render("sshm "+m.appVersion) + "  " + help
 	}
 	return help
 }
