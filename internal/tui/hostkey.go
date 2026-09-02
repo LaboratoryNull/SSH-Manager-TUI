@@ -105,7 +105,7 @@ func (m *Model) hostKeyPromptView() string {
 	))
 	box := borderStyle.Copy().BorderForeground(errorColor).Padding(1, 2).Width(boxWidth - 2).
 		Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, box)
+	return m.placeCentered(box)
 }
 
 func fieldLine(label, value string, width int) string {

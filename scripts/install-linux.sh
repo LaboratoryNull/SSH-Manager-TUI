@@ -51,62 +51,26 @@ if [ "$actual" != "$expected" ]; then
     exit 1
 fi
 
-path_contains() {
-    case ":$PATH:" in
-        *":$1:"*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-install_directory=${SSHM_INSTALL_DIR:-}
-if [ -z "$install_directory" ]; then
-    if path_contains /usr/local/bin; then
-        install_directory=/usr/local/bin
-    else
-        install_directory="$HOME/.local/bin"
-    fi
-fi
+install_directory=${SSHM_INSTALL_DIR:-/usr/local/bin}
 
 install_files() {
-    install -d "$install_directory"
+    install -d -m 0755 "$install_directory"
     install -m 0755 "$temporary_directory/$asset" "$install_directory/sshm"
     ln -sfn sshm "$install_directory/ssh-manager"
 }
 
-case "$install_directory" in
-    "$HOME"/*) install_files ;;
-    *)
-        if [ -d "$install_directory" ] && [ -w "$install_directory" ]; then
-            install_files
-        elif [ ! -e "$install_directory" ] && [ -w "$(dirname "$install_directory")" ]; then
-            install_files
-        elif command -v sudo >/dev/null 2>&1; then
-            sudo install -d "$install_directory"
-            sudo install -m 0755 "$temporary_directory/$asset" "$install_directory/sshm"
-            sudo ln -sfn sshm "$install_directory/ssh-manager"
-        else
-            echo "Cannot write to $install_directory and sudo is unavailable." >&2
-            exit 1
-        fi
-        ;;
-esac
-
-if ! path_contains "$install_directory"; then
-    path_line="export PATH=\"$install_directory:\$PATH\""
-    case "${SHELL:-}" in
-        */zsh) profile="$HOME/.zshrc" ;;
-        */bash) profile="$HOME/.bashrc" ;;
-        */fish)
-            profile="$HOME/.config/fish/config.fish"
-            mkdir -p "$(dirname "$profile")"
-            path_line="fish_add_path $install_directory"
-            ;;
-        *) profile="$HOME/.profile" ;;
-    esac
-    touch "$profile"
-    if ! grep -F "$path_line" "$profile" >/dev/null 2>&1; then
-        printf '\n# SSH Manager TUI\n%s\n' "$path_line" >> "$profile"
-    fi
+if [ -d "$install_directory" ] && [ -w "$install_directory" ]; then
+    install_files
+elif [ "$(id -u)" -eq 0 ]; then
+    install_files
+elif command -v sudo >/dev/null 2>&1; then
+    echo "Installing sshm into $install_directory (sudo is required)…"
+    sudo install -d -m 0755 "$install_directory"
+    sudo install -m 0755 "$temporary_directory/$asset" "$install_directory/sshm"
+    sudo ln -sfn sshm "$install_directory/ssh-manager"
+else
+    echo "sudo is required to install sshm into $install_directory." >&2
+    exit 1
 fi
 
 echo "sshm $version installed in $install_directory"

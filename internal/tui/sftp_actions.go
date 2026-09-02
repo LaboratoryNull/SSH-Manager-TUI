@@ -328,5 +328,5 @@ func (m *Model) sftpActionView() string {
 	)
 	lines = append(lines, help)
 	box := borderStyle.Copy().BorderForeground(accentWarm).Padding(1, 2).Width(boxWidth - 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, box)
+	return m.placeCentered(box)
 }

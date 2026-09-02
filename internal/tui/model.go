@@ -1282,6 +1282,14 @@ func (m *Model) contentHeight() int {
 	return max(1, m.height-1)
 }
 
+func (m *Model) placeCentered(content string) string {
+	whitespace := lipgloss.NewStyle().Background(background)
+	return lipgloss.Place(
+		m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, content,
+		lipgloss.WithWhitespaceStyle(whitespace),
+	)
+}
+
 func (m *Model) connectedHints(width int) string {
 	keys := currentPlatformKeys()
 	compact := compactPlatformKeys()
@@ -1348,7 +1356,7 @@ func (m *Model) sessionsView() string {
 	}
 	boxWidth := min(max(74, lipgloss.Width(strings.Join(lines, "\n"))+6), max(20, m.width-4))
 	box := borderStyle.Copy().Padding(1, 2).Width(boxWidth).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, box)
+	return m.placeCentered(box)
 }
 
 func (m *Model) groupPromptView() string {
@@ -1391,7 +1399,7 @@ func (m *Model) groupPromptView() string {
 		renderHints([2]string{"↑/↓", "выбрать"}, [2]string{"Tab", "подставить"}, [2]string{"Enter", "сохранить"}, [2]string{"Esc", "отмена"}),
 	)
 	box := borderStyle.Copy().BorderForeground(accentWarm).Padding(1, 2).Width(innerWidth + 4).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, box)
+	return m.placeCentered(box)
 }
 
 func (m *Model) formView() string {
@@ -1430,7 +1438,7 @@ func (m *Model) formView() string {
 		lines = append(lines, "", statusLine(m.status))
 	}
 	box := borderStyle.Copy().Padding(1, 2).Width(min(76, max(30, m.width-6))).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, box)
+	return m.placeCentered(box)
 }
 
 func (m *Model) connectedView() string {
@@ -1669,7 +1677,7 @@ func (m *Model) pickerView() string {
 	}
 	lines = append(lines, help)
 	box := borderStyle.Copy().BorderForeground(accentWarm).Padding(1, 2).Width(boxWidth - 2).Height(boxHeight - 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, box)
+	return m.placeCentered(box)
 }
 
 func (m *Model) pickerListHeight() int {

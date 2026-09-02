@@ -253,5 +253,5 @@ func (m *Model) profileManagerView() string {
 		lines = append(lines, "", statusLine(manager.status))
 	}
 	box := borderStyle.Copy().BorderForeground(accentWarm).Padding(1, 2).Width(width - 2).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, box)
+	return m.placeCentered(box)
 }

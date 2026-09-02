@@ -157,5 +157,5 @@ func (m *Model) passwordPromptView() string {
 	))
 	box := borderStyle.Copy().BorderForeground(warningColor).Padding(1, 2).Width(boxWidth - 2).
 		Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.contentHeight(), lipgloss.Center, lipgloss.Center, box)
+	return m.placeCentered(box)
 }

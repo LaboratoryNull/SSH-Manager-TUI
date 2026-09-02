@@ -5,18 +5,21 @@
 
 ## Установка
 
-Установщик сам выберет `amd64`/`arm64`, проверит SHA-256 и настроит `PATH`.
+Установщик сам выберет `amd64`/`arm64`, проверит SHA-256 и установит команду
+в `/usr/local/bin`. При необходимости будет запрошен пароль `sudo`.
 
 ### Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/savuerka/ssh-manager-tui/main/scripts/install-linux.sh | sh && export PATH="$HOME/.local/bin:/usr/local/bin:$PATH" && sshm
+curl -fsSL https://raw.githubusercontent.com/savuerka/ssh-manager-tui/main/scripts/install-linux.sh | sh
+sshm
 ```
 
 ### macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/savuerka/ssh-manager-tui/main/scripts/install-macos.sh | sh && export PATH="$HOME/.local/bin:/usr/local/bin:$PATH" && sshm
+curl -fsSL https://raw.githubusercontent.com/savuerka/ssh-manager-tui/main/scripts/install-macos.sh | sh
+sshm
 ```
 
 ### Windows
@@ -56,10 +59,10 @@ sshm
 
 ```bash
 sshm update --check
-sshm update
 ```
 
-В Windows повторно запустите команду установки после закрытия `sshm.exe`.
+Для обновления повторно запустите команду установки. В Windows сначала закройте
+`sshm.exe`.
 
 ## Сборка и релиз
 
