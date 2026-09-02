@@ -11,8 +11,13 @@ import (
 
 func TestGenerateCreatesManifestForEverySupportedPlatform(t *testing.T) {
 	directory := t.TempDir()
-	for _, platform := range []string{"linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64"} {
-		if err := os.WriteFile(filepath.Join(directory, "sshm-"+platform), []byte(platform), 0o755); err != nil {
+	artifacts := map[string]string{
+		"linux-amd64": "sshm-linux-amd64", "linux-arm64": "sshm-linux-arm64",
+		"darwin-amd64": "sshm-darwin-amd64", "darwin-arm64": "sshm-darwin-arm64",
+		"windows-amd64": "sshm-windows-amd64.exe", "windows-arm64": "sshm-windows-arm64.exe",
+	}
+	for platform, name := range artifacts {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(platform), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -28,11 +33,11 @@ func TestGenerateCreatesManifestForEverySupportedPlatform(t *testing.T) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Version != "v1.2.3" || len(manifest.Artifacts) != 4 {
+	if manifest.Version != "v1.2.3" || len(manifest.Artifacts) != len(artifacts) {
 		t.Fatalf("manifest = %#v", manifest)
 	}
 	for platform, artifact := range manifest.Artifacts {
-		if artifact.SHA256 == "" || artifact.Size == 0 || artifact.URL != "https://updates.example/v1.2.3/sshm-"+platform {
+		if artifact.SHA256 == "" || artifact.Size == 0 || artifact.URL != "https://updates.example/v1.2.3/"+artifacts[platform] {
 			t.Fatalf("artifact %s = %#v", platform, artifact)
 		}
 	}

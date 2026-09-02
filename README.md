@@ -36,25 +36,57 @@
 
 ## Установка
 
-Нужен Go 1.25 или новее.
+Готовые релизы не требуют Go и сами выбирают архитектуру `amd64` или `arm64`.
+Установщик проверяет SHA-256 скачанного файла и добавляет каталог приложения в
+`PATH` автоматически.
 
-Обычная пользовательская установка не требует `sudo`:
+### Linux
 
 ```bash
-make install
+curl -fsSL https://raw.githubusercontent.com/savuerka/ssh-manager-tui/main/scripts/install-linux.sh | sh && exec "$SHELL" -i
 sshm
 ```
 
-Бинарник устанавливается в `~/.local/bin/sshm`. Если каталог ещё не входит в
-`PATH`, добавьте в `~/.zshrc` или `~/.bashrc`:
+Если `/usr/local/bin` уже находится в `PATH`, установщик использует его и при
+необходимости запросит `sudo`. Иначе приложение устанавливается в
+`~/.local/bin`, а `PATH` записывается в конфигурацию текущей оболочки. Последняя
+часть команды перезапускает оболочку, поэтому `sshm` доступен сразу.
+
+### macOS
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+curl -fsSL https://raw.githubusercontent.com/savuerka/ssh-manager-tui/main/scripts/install-macos.sh | sh && exec "$SHELL" -i
+sshm
 ```
 
-Для установки всем пользователям:
+Поддерживаются Mac на Intel и Apple Silicon. Правила выбора каталога и
+настройки `PATH` те же, что на Linux.
+
+### Windows
+
+Откройте PowerShell и выполните:
+
+```powershell
+irm https://raw.githubusercontent.com/savuerka/ssh-manager-tui/main/scripts/install-windows.ps1 | iex
+sshm
+```
+
+Приложение устанавливается в `%LOCALAPPDATA%\Programs\sshm`. Установщик
+добавляет этот каталог и в пользовательский `PATH`, и в текущую сессию
+PowerShell, поэтому перезапуск терминала не требуется. Также создаётся
+совместимая команда `ssh-manager`.
+
+Для установки конкретной версии вместо последней задайте `SSHM_VERSION`,
+например `SSHM_VERSION=v1.2.3` на Linux/macOS или
+`$env:SSHM_VERSION = "v1.2.3"` в PowerShell. Каталог можно переопределить через
+`SSHM_INSTALL_DIR`.
+
+### Сборка из исходников
+
+Для этого варианта нужны Go 1.25 или новее, `make` и клонированный репозиторий:
 
 ```bash
+make test
 sudo make install PREFIX=/usr/local
 ```
 
@@ -86,21 +118,14 @@ sshm update
 `linux/darwin` и `amd64/arm64`, проверяет размер и SHA-256, записывает файл рядом
 с текущим бинарником и атомарно заменяет его. Если `sshm` установлен системно и
 текущий пользователь не может заменить `/usr/local/bin/sshm`, обновление нужно
-выполнить через checkout: `sudo make install PREFIX=/usr/local`.
+выполнить повторным запуском установщика. В Windows для обновления также
+повторно запустите PowerShell-команду установки после закрытия `sshm.exe`.
 
-Для приватного GitLab токен передаётся через окружение и не попадает в аргументы
-процесса:
-
-```bash
-SSHM_UPDATE_TOKEN=glpat-... sshm update
-```
-
-По умолчанию используется release URL текущего GitLab-проекта. Его можно
+По умолчанию используется manifest последнего GitHub Release. Его можно
 переопределить при сборке (`make install UPDATE_URL=https://…/manifest.json`)
 или во время запуска (`SSHM_UPDATE_URL=https://…/manifest.json sshm update`).
 Updater принимает удалённые manifest и артефакты только по HTTPS; HTTP разрешён
-лишь для localhost в тестовых окружениях. Токен не пересылается на другой хост
-при внешней ссылке или redirect.
+лишь для localhost в тестовых окружениях.
 
 Если приложение обновляется непосредственно из клонированного репозитория:
 
@@ -115,24 +140,26 @@ make update
 
 ### Подготовка релиза
 
-Релизы используют теги SemVer:
+Обычные push и pull request проверяются workflow `.github/workflows/ci.yml`:
+тестами, `go vet` и сборкой для Linux, macOS и Windows на `amd64`/`arm64`.
+
+Публикация полностью автоматическая. Создайте и отправьте SemVer-тег:
 
 ```bash
 git tag v1.0.0
-make release VERSION=v1.0.0
+git push origin v1.0.0
 ```
 
-В `dist/` появятся четыре бинарника (`linux/darwin` × `amd64/arm64`) и
-`manifest.json`. Эти пять файлов нужно загрузить в GitLab Release и назначить
-им прямые пути `/downloads/<имя файла>`. Manifest по постоянному адресу
-`.../releases/permalink/latest/downloads/manifest.json` становится источником
-для `sshm update`. Если файлы публикуются в другом месте, передайте одинаковую
-базу при сборке релиза:
+Workflow `.github/workflows/release.yml` ещё раз запускает тесты, собирает шесть
+бинарников, создаёт `manifest.json` и `checksums.txt`, а затем публикует GitHub
+Release с автоматически сформированным описанием. Теги с суффиксом, например
+`v1.1.0-rc.1`, публикуются как pre-release и не заменяют последнюю стабильную
+версию.
+
+Тот же набор файлов можно собрать локально:
 
 ```bash
-make release VERSION=v1.0.0 \
-  RELEASE_BASE_URL=https://downloads.example/sshm/v1.0.0 \
-  UPDATE_URL=https://downloads.example/sshm/latest/manifest.json
+make release VERSION=v1.0.0 GITHUB_REPOSITORY=savuerka/ssh-manager-tui
 ```
 
 ## Клавиши

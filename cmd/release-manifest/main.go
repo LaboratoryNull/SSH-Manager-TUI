@@ -39,8 +39,19 @@ func generate(directory, version, baseURL, output string) error {
 		return fmt.Errorf("base URL must be an absolute HTTPS URL")
 	}
 	manifest := update.Manifest{Version: version, Artifacts: make(map[string]update.Artifact)}
-	for _, platform := range []string{"linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64"} {
-		name := "sshm-" + platform
+	artifacts := []struct {
+		platform string
+		name     string
+	}{
+		{"linux-amd64", "sshm-linux-amd64"},
+		{"linux-arm64", "sshm-linux-arm64"},
+		{"darwin-amd64", "sshm-darwin-amd64"},
+		{"darwin-arm64", "sshm-darwin-arm64"},
+		{"windows-amd64", "sshm-windows-amd64.exe"},
+		{"windows-arm64", "sshm-windows-arm64.exe"},
+	}
+	for _, artifact := range artifacts {
+		platform, name := artifact.platform, artifact.name
 		filePath := filepath.Join(directory, name)
 		digest, size, err := fileDigest(filePath)
 		if err != nil {

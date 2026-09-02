@@ -133,6 +133,7 @@ type tabState struct {
 	forwardModal         *forwardModal
 	forwards             map[string]*forwardRuntime
 	hostKeyPrompt        *hostKeyPrompt
+	passwordPrompt       *passwordPrompt
 	reconnect            *reconnectState
 }
 
@@ -204,6 +205,7 @@ type Model struct {
 	forwardModal         *forwardModal
 	forwards             map[string]*forwardRuntime
 	hostKeyPrompt        *hostKeyPrompt
+	passwordPrompt       *passwordPrompt
 	reconnect            *reconnectState
 }
 
@@ -286,18 +288,35 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = ""
 				return m, nil
 			}
+			if remote.IsAuthenticationError(msg.err) {
+				return m.handleAuthenticationFailure(msg.profile)
+			}
+			if m.passwordPrompt != nil {
+				m.passwordPrompt.status = "Ошибка подключения: " + msg.err.Error()
+				return m, nil
+			}
 			m.status = "Ошибка подключения: " + msg.err.Error()
 			return m, nil
 		}
+		passwordChanged := m.passwordPrompt != nil
 		m.profile, m.conn, m.page = msg.profile, msg.conn, pageConnected
 		m.filesFocused, m.sftpHidden = false, true
 		m.forwardModal = nil
 		m.forwards = make(map[string]*forwardRuntime)
 		m.status = "Подключено"
+		var passwordSaveErr error
+		if passwordChanged {
+			passwordSaveErr = m.saveConnectedPassword(msg.profile)
+			m.passwordPrompt = nil
+		}
 		m.resizeRemote()
 		m.term.SetCurrentDirectory(msg.conn.Home)
-		if err := m.recordConnection(msg.profile); err != nil {
+		if passwordSaveErr != nil {
+			m.status = "Подключено, но новый пароль не сохранён: " + passwordSaveErr.Error()
+		} else if err := m.recordConnection(msg.profile); err != nil {
 			m.status = "Подключено, но статистика не сохранена: " + err.Error()
+		} else if passwordChanged {
+			m.status = "Подключено, новый пароль сохранён"
 		}
 		m.root = &fileNode{Name: msg.conn.Home, Path: msg.conn.Home, Dir: true, Expanded: true, Loading: true}
 		m.visible = []*fileNode{m.root}
@@ -475,6 +494,12 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	case tea.PasteMsg:
 		m.clipboardPaste = false
+		if m.passwordPrompt != nil {
+			var cmd tea.Cmd
+			m.passwordPrompt.input, cmd = m.passwordPrompt.input.Update(msg)
+			m.passwordPrompt.status = ""
+			return m, cmd
+		}
 		if m.sftpDialog != nil && m.sftpDialog.action != sftpActionDelete {
 			var cmd tea.Cmd
 			m.sftpDialog.input, cmd = m.sftpDialog.input.Update(msg)
@@ -496,6 +521,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.sftpDialog != nil && m.sftpDialog.action != sftpActionDelete {
 		var cmd tea.Cmd
 		m.sftpDialog.input, cmd = m.sftpDialog.input.Update(message)
+		return m, cmd
+	}
+	if m.passwordPrompt != nil {
+		var cmd tea.Cmd
+		m.passwordPrompt.input, cmd = m.passwordPrompt.input.Update(message)
 		return m, cmd
 	}
 
@@ -525,6 +555,9 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.hostKeyPrompt != nil {
 		return m.handleHostKeyPrompt(key)
+	}
+	if m.passwordPrompt != nil {
+		return m.handlePasswordPrompt(key)
 	}
 	if m.reconnect != nil {
 		return m.handleReconnectKey(key)
@@ -1137,6 +1170,9 @@ func (m *Model) viewContent() string {
 	if m.hostKeyPrompt != nil {
 		return m.tabsView() + "\n" + m.hostKeyPromptView()
 	}
+	if m.passwordPrompt != nil {
+		return m.tabsView() + "\n" + m.passwordPromptView()
+	}
 	if m.groupInput != nil {
 		return m.tabsView() + "\n" + m.groupPromptView()
 	}
@@ -1203,7 +1239,7 @@ func (m *Model) tabBarHelp() string {
 }
 
 func (m *Model) themeHintVisible() bool {
-	return m.page == pageSessions && m.groupInput == nil && m.profileManager == nil && m.importWizard == nil && m.hostKeyPrompt == nil
+	return m.page == pageSessions && m.groupInput == nil && m.profileManager == nil && m.importWizard == nil && m.hostKeyPrompt == nil && m.passwordPrompt == nil
 }
 
 func (m *Model) tabTitle(index int) string {
@@ -2252,7 +2288,7 @@ func (m *Model) captureTab() *tabState {
 		transferLastDone: m.transferLastDone, transferSpeed: m.transferSpeed,
 		transferCancel:       m.transferCancel,
 		transferRemoteTarget: m.transferRemoteTarget, forwardModal: m.forwardModal, forwards: m.forwards,
-		hostKeyPrompt: m.hostKeyPrompt, reconnect: m.reconnect,
+		hostKeyPrompt: m.hostKeyPrompt, passwordPrompt: m.passwordPrompt, reconnect: m.reconnect,
 	}
 }
 
@@ -2287,6 +2323,7 @@ func (m *Model) restoreTab(index int) {
 	m.transferRemoteTarget = state.transferRemoteTarget
 	m.forwardModal, m.forwards = state.forwardModal, state.forwards
 	m.hostKeyPrompt = state.hostKeyPrompt
+	m.passwordPrompt = state.passwordPrompt
 	m.reconnect = state.reconnect
 }
 
@@ -2313,6 +2350,7 @@ func (m *Model) resetTab(id uint64) {
 	m.transferStarted, m.transferLastDone, m.transferSpeed = time.Time{}, 0, 0
 	m.forwardModal, m.forwards = nil, nil
 	m.hostKeyPrompt = nil
+	m.passwordPrompt = nil
 	m.reconnect = nil
 	m.resetForm()
 }
@@ -2493,6 +2531,7 @@ func (m *Model) disconnect(status string) {
 	m.windowsCtrlWait = false
 	m.forwardModal, m.forwards = nil, nil
 	m.hostKeyPrompt = nil
+	m.passwordPrompt = nil
 	m.reconnect = nil
 	m.page, m.status = pageSessions, status
 }
@@ -2509,6 +2548,15 @@ func connectCommand(tabID uint64, profile config.Session, width, height int) tea
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		conn, err := remote.Connect(ctx, profile, width, height, false)
+		return connectMsg{conn: conn, profile: profile, err: err, tabID: tabID}
+	}
+}
+
+func passwordConnectCommand(tabID uint64, profile config.Session, width, height int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		conn, err := remote.ConnectWithPassword(ctx, profile, width, height)
 		return connectMsg{conn: conn, profile: profile, err: err, tabID: tabID}
 	}
 }

@@ -38,6 +38,24 @@ type Connection struct {
 	forwards   map[*Forward]struct{}
 }
 
+// ErrAuthentication marks failures caused by rejected SSH credentials.  The
+// SSH client package does not expose a typed client-side authentication error,
+// so Connect classifies that handshake failure before returning it to the UI.
+var ErrAuthentication = errors.New("SSH authentication failed")
+
+// IsAuthenticationError reports whether a connection failed because none of
+// the configured credentials were accepted by the server.
+func IsAuthenticationError(err error) bool {
+	return errors.Is(err, ErrAuthentication)
+}
+
+func authenticationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", ErrAuthentication, err)
+}
+
 func (c *Connection) Close() {
 	c.closeOnce.Do(func() {
 		if c.done != nil {
@@ -116,8 +134,32 @@ func (c *Connection) Send(data []byte) error {
 }
 
 func Connect(ctx context.Context, profile config.Session, width, height int, keyOnly bool) (*Connection, error) {
-	auth, err := authMethods(profile, keyOnly)
+	return connect(ctx, profile, width, height, keyOnly, false)
+}
+
+// ConnectWithPassword establishes a connection using only password
+// authentication. It is used when verifying a replacement password so a
+// successful private-key fallback cannot cause an unverified password to be
+// persisted.
+func ConnectWithPassword(ctx context.Context, profile config.Session, width, height int) (*Connection, error) {
+	return connect(ctx, profile, width, height, false, true)
+}
+
+func connect(ctx context.Context, profile config.Session, width, height int, keyOnly, passwordOnly bool) (*Connection, error) {
+	var auth []ssh.AuthMethod
+	var err error
+	if passwordOnly {
+		if profile.Password == "" {
+			return nil, authenticationError(errors.New("password is empty"))
+		}
+		auth = []ssh.AuthMethod{ssh.Password(profile.Password)}
+	} else {
+		auth, err = authMethods(profile, keyOnly)
+	}
 	if err != nil {
+		if !keyOnly && strings.Contains(err.Error(), "no password or usable private key configured") {
+			return nil, authenticationError(err)
+		}
 		return nil, err
 	}
 	hostKeys, err := hostKeyCallback()
@@ -149,6 +191,10 @@ func Connect(ctx context.Context, profile config.Session, width, height int, key
 	conn, chans, reqs, err := ssh.NewClientConn(netConn, address, clientConfig)
 	if err != nil {
 		netConn.Close()
+		if strings.Contains(err.Error(), "ssh: unable to authenticate") ||
+			strings.Contains(err.Error(), "no supported methods remain") {
+			return nil, authenticationError(err)
+		}
 		return nil, fmt.Errorf("SSH handshake: %w", err)
 	}
 	sshClient := ssh.NewClient(conn, chans, reqs)

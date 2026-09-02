@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 
@@ -75,5 +76,16 @@ func TestConnectionFailureClosesTransport(t *testing.T) {
 	buffer := make([]byte, 1)
 	if _, err := server.Read(buffer); err == nil {
 		t.Fatal("transport remained open after terminal failure")
+	}
+}
+
+func TestAuthenticationErrorCanBeIdentifiedThroughWrapping(t *testing.T) {
+	cause := errors.New("ssh: unable to authenticate, no supported methods remain")
+	err := fmt.Errorf("connect: %w", authenticationError(cause))
+	if !IsAuthenticationError(err) {
+		t.Fatalf("authentication error was not identified: %v", err)
+	}
+	if IsAuthenticationError(errors.New("dial timeout")) {
+		t.Fatal("network error was identified as an authentication failure")
 	}
 }
