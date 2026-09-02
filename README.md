@@ -63,19 +63,3 @@ sshm update --check
 ```
 
 Также приложение проверяет обновления при запуске и показывает кнопку установки.
-
-## Сборка и релиз
-
-Нужен Go 1.25 или новее:
-
-```bash
-make test
-make build
-```
-
-GitHub Release для Linux, macOS и Windows создаётся автоматически по тегу:
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
