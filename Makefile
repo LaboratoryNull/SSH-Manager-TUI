@@ -10,7 +10,7 @@ BINDIR           ?= $(PREFIX)/bin
 DESTDIR          ?=
 DISTDIR          ?= dist
 INSTALL          ?= install
-GITHUB_REPOSITORY ?= savuerka/ssh-manager-tui
+GITHUB_REPOSITORY ?= LaboratoryNull/SSH-Manager-TUI
 UPDATE_URL       ?= https://github.com/$(GITHUB_REPOSITORY)/releases/latest/download/manifest.json
 
 ifeq ($(OS),Windows_NT)

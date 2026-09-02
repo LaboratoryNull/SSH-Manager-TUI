@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Repository = if ($env:SSHM_GITHUB_REPOSITORY) { $env:SSHM_GITHUB_REPOSITORY } else { "savuerka/ssh-manager-tui" }
+$Repository = if ($env:SSHM_GITHUB_REPOSITORY) { $env:SSHM_GITHUB_REPOSITORY } else { "LaboratoryNull/SSH-Manager-TUI" }
 $Version = if ($env:SSHM_VERSION) { $env:SSHM_VERSION } else { "latest" }
 
 $Architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()

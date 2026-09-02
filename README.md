@@ -11,14 +11,14 @@
 ### Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/savuerka/ssh-manager-tui/main/scripts/install-linux.sh | sh
+curl -fsSL https://raw.githubusercontent.com/LaboratoryNull/SSH-Manager-TUI/main/scripts/install-linux.sh | sh
 sshm
 ```
 
 ### macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/savuerka/ssh-manager-tui/main/scripts/install-macos.sh | sh
+curl -fsSL https://raw.githubusercontent.com/LaboratoryNull/SSH-Manager-TUI/main/scripts/install-macos.sh | sh
 sshm
 ```
 
@@ -27,7 +27,7 @@ sshm
 В PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/savuerka/ssh-manager-tui/main/scripts/install-windows.ps1 | iex
+irm https://raw.githubusercontent.com/LaboratoryNull/SSH-Manager-TUI/main/scripts/install-windows.ps1 | iex
 sshm
 ```
 

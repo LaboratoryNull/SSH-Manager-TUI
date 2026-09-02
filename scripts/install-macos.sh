@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repository=${SSHM_GITHUB_REPOSITORY:-savuerka/ssh-manager-tui}
+repository=${SSHM_GITHUB_REPOSITORY:-LaboratoryNull/SSH-Manager-TUI}
 version=${SSHM_VERSION:-latest}
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -53,6 +53,8 @@ install_files() {
 }
 
 if [ -d "$install_directory" ] && [ -w "$install_directory" ]; then
+    install_files
+elif [ ! -e "$install_directory" ] && [ -w "$(dirname "$install_directory")" ]; then
     install_files
 elif [ "$(id -u)" -eq 0 ]; then
     install_files
