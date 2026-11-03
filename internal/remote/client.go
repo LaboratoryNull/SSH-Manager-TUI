@@ -34,7 +34,10 @@ type Connection struct {
 	netConn   net.Conn
 	// received counts bytes read from the server; any inbound traffic
 	// proves the connection is alive even if a keepalive reply is late.
-	received   *atomic.Uint64
+	received *atomic.Uint64
+	// rtt is the last keepalive round trip in nanoseconds (0 = unknown).
+	rtt        atomic.Int64
+	started    time.Time
 	input      chan []byte
 	done       chan struct{}
 	failureMu  sync.Mutex
@@ -204,7 +207,7 @@ func connect(ctx context.Context, profile config.Session, width, height int, key
 		return nil, fmt.Errorf("SSH handshake: %w", err)
 	}
 	sshClient := ssh.NewClient(conn, chans, reqs)
-	result := &Connection{SSH: sshClient, netConn: netConn, received: received, input: make(chan []byte, 256), done: make(chan struct{})}
+	result := &Connection{SSH: sshClient, netConn: netConn, received: received, input: make(chan []byte, 256), done: make(chan struct{}), started: time.Now()}
 	fail := func(err error) (*Connection, error) {
 		result.Close()
 		return nil, err
@@ -393,12 +396,16 @@ func (c *Connection) keepalive(interval, timeout time.Duration) {
 	// stop after the first unanswered one and the TCP keepalive configured
 	// in sshDialer detects dead peers instead.
 	answered := false
+	// The first probe goes out soon so the latency is known right away.
+	wait := time.After(min(time.Second, interval))
 	for {
 		select {
 		case <-c.done:
 			return
-		case <-ticker.C:
+		case <-wait:
+			wait = ticker.C
 			before := c.receivedBytes()
+			sent := time.Now()
 			reply := make(chan error, 1)
 			go func() {
 				_, _, err := c.SSH.SendRequest("keepalive@openssh.com", true, nil)
@@ -413,6 +420,7 @@ func (c *Connection) keepalive(interval, timeout time.Duration) {
 					return
 				}
 				answered = true
+				c.rtt.Store(int64(time.Since(sent)))
 			case <-timer.C:
 				switch {
 				case !answered:
@@ -431,6 +439,23 @@ func (c *Connection) keepalive(interval, timeout time.Duration) {
 			}
 		}
 	}
+}
+
+// RTT is the round trip of the last answered keepalive, or 0 when the
+// server does not answer keepalives (or none was sent yet).
+func (c *Connection) RTT() time.Duration {
+	if c == nil {
+		return 0
+	}
+	return time.Duration(c.rtt.Load())
+}
+
+// Uptime is how long the connection has been established.
+func (c *Connection) Uptime() time.Duration {
+	if c == nil || c.started.IsZero() {
+		return 0
+	}
+	return time.Since(c.started)
 }
 
 func (c *Connection) receivedBytes() uint64 {

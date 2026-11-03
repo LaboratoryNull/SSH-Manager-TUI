@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"path"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -223,6 +224,10 @@ type Model struct {
 	// historyHosts and palette are shared by all tabs.
 	historyHosts []historyHost
 	palette      *commandPalette
+	// paneTabs are the tabs sharing the screen (split view, up to four);
+	// zoomedTab is a pane temporarily shown full screen.
+	paneTabs  []uint64
+	zoomedTab uint64
 }
 
 var (
@@ -275,7 +280,7 @@ func New(store *config.Store, application ...AppInfo) (*Model, error) {
 }
 
 func (m *Model) Init() tea.Cmd {
-	commands := []tea.Cmd{textinput.Blink, loadHistoryHosts}
+	commands := []tea.Cmd{textinput.Blink, loadHistoryHosts, uiTick()}
 	if command := m.checkForUpdate(); command != nil {
 		commands = append(commands, command)
 	}
@@ -309,6 +314,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case historyHostsMsg:
 		m.historyHosts = msg.hosts
 		return m, nil
+	case uiTickMsg:
+		return m, uiTick()
 	case updateCheckMsg:
 		return m.handleUpdateCheck(msg)
 	case updateInstallMsg:
@@ -317,9 +324,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleElevatedUpdateFinished(msg)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		if m.page == pageConnected {
-			m.resizeRemote()
-		}
+		m.resizePanes()
 		return m, nil
 	case connectMsg:
 		m.connecting = false
@@ -723,7 +728,18 @@ func (m *Model) handleEscapeCommand(key tea.KeyPressMsg) (bool, tea.Cmd) {
 		m.openCommandPalette()
 	case "b", "и":
 		restore()
+		if m.inSplit(m.tabID) {
+			// Files need the room of a full-screen terminal.
+			m.zoomedTab = m.tabID
+		}
 		m.toggleSFTP()
+		m.resizePanes()
+	case "s", "ы":
+		restore()
+		m.openSplitPicker()
+	case "z", "я":
+		restore()
+		m.toggleZoom()
 	case "t", "е":
 		restore()
 		m.openTab()
@@ -739,12 +755,16 @@ func (m *Model) handleEscapeCommand(key tea.KeyPressMsg) (bool, tea.Cmd) {
 		}
 		restore()
 		m.cancelTransfer()
-	case "right", "tab":
+	case "right", "down", "tab":
 		restore()
-		m.switchTab((m.activeTab + 1) % len(m.tabs))
-	case "left", "shift+tab":
+		if !m.inSplit(m.tabID) || !m.focusPane(1) {
+			m.switchTab((m.activeTab + 1) % len(m.tabs))
+		}
+	case "left", "up", "shift+tab":
 		restore()
-		m.switchTab((m.activeTab - 1 + len(m.tabs)) % len(m.tabs))
+		if !m.inSplit(m.tabID) || !m.focusPane(-1) {
+			m.switchTab((m.activeTab - 1 + len(m.tabs)) % len(m.tabs))
+		}
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		index := int(key.Keystroke()[0] - '1')
 		if index >= len(m.tabs) {
@@ -927,7 +947,7 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if s == "esc" {
 		m.escapePending = true
 		m.escapeID++
-		m.status = "k — команды · b — файлы · t — вкладка · q — отключиться"
+		m.status = "k — команды · s — разделить · b — файлы · q — отключиться"
 		return m, escapeTimeoutCommand(m.tabID, m.escapeID)
 	}
 	// With the file panel hidden Ctrl+Space belongs to the remote program
@@ -1236,6 +1256,9 @@ func (m *Model) viewContent() string {
 	if m.importWizard != nil {
 		return m.frame(m.importView())
 	}
+	if m.gridVisible() {
+		return m.frame(m.gridView())
+	}
 	switch m.page {
 	case pageForm:
 		content = m.formView()
@@ -1320,7 +1343,13 @@ func (m *Model) connectedHints() [][2]string {
 	if !m.sftpHidden {
 		files = "Скрыть файлы"
 	}
-	return [][2]string{{"Esc k", "Команды"}, {"Esc b", files}, {"Esc q", "Отключиться"}}
+	if m.inSplit(m.tabID) {
+		return [][2]string{{"Esc k", "Команды"}, {"Esc ←→", "Панель"}, {"Esc z", "Развернуть"}, {"Esc s", "Добавить"}}
+	}
+	if m.zoomedTab == m.tabID && m.zoomedTab != 0 {
+		return [][2]string{{"Esc k", "Команды"}, {"Esc z", "Вернуть панели"}, {"Esc b", files}, {"Esc q", "Отключиться"}}
+	}
+	return [][2]string{{"Esc k", "Команды"}, {"Esc s", "Разделить"}, {"Esc b", files}, {"Esc q", "Отключиться"}}
 }
 
 func (m *Model) groupPromptView() string {
@@ -1430,7 +1459,9 @@ func (m *Model) connectedView() string {
 	}
 	dot := lipgloss.NewStyle().Foreground(successColor).Render(" ●")
 	title := lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(" " + ellipsize(name, max(4, termW/3)) + "  ")
-	consoleTitle := dot + title + lipgloss.NewStyle().Foreground(muted).Render(ellipsize(detail, max(1, termW-lipgloss.Width(dot)-lipgloss.Width(title))))
+	readout := telemetry(m.conn)
+	room := max(1, termW-lipgloss.Width(dot)-lipgloss.Width(title)-lipgloss.Width(readout)-3)
+	consoleTitle := withTelemetry(dot+title+lipgloss.NewStyle().Foreground(muted).Render(ellipsize(detail, room)), readout, termW)
 	consoleLines := []string{consoleTitle}
 	termText := ""
 	if m.term != nil {
@@ -2056,6 +2087,9 @@ func (m *Model) layout() (fileW, consoleW, innerH, termW, termH int) {
 }
 
 func (m *Model) consoleSize() (int, int) {
+	if rect, ok := m.paneRectFor(m.tabID); ok {
+		return rect.termSize()
+	}
 	_, _, _, w, h := m.layout()
 	return w, h
 }
@@ -2394,9 +2428,14 @@ func (m *Model) switchTab(index int) {
 		return
 	}
 	m.palette = nil
+	// Moving the focus ends a zoom, as in tmux.
+	wasZoomed := m.zoomedTab != 0
+	m.zoomedTab = 0
 	m.saveActiveTab()
 	m.restoreTab(index)
-	if m.page == pageConnected {
+	if wasZoomed {
+		m.resizePanes()
+	} else if m.page == pageConnected {
 		m.resizeRemote()
 	}
 }
@@ -2428,11 +2467,21 @@ func (m *Model) closeActiveTab() {
 		return
 	}
 	closed := m.activeTab
+	closedID := m.tabID
 	m.tabs = append(m.tabs[:closed], m.tabs[closed+1:]...)
-	m.restoreTab(min(closed, len(m.tabs)-1))
-	if m.page == pageConnected {
-		m.resizeRemote()
+	target := min(closed, len(m.tabs)-1)
+	// Closing a pane keeps the focus on the remaining panes.
+	if position := m.paneIndex(closedID); position >= 0 {
+		m.paneTabs = slices.Delete(m.paneTabs, position, position+1)
+		if len(m.paneTabs) > 0 {
+			if _, index := m.tabStateByID(m.paneTabs[min(position, len(m.paneTabs)-1)]); index >= 0 {
+				target = index
+			}
+		}
 	}
+	m.restoreTab(target)
+	m.normalizePanes()
+	m.resizePanes()
 }
 
 func (m *Model) tabIndexByID(id uint64) int {

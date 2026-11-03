@@ -13,8 +13,8 @@ import (
 )
 
 func TestThemesAreDistinctAndUseDarkBackgrounds(t *testing.T) {
-	if len(themes) != 5 {
-		t.Fatalf("theme count = %d, want 5", len(themes))
+	if len(themes) != 7 {
+		t.Fatalf("theme count = %d, want 7", len(themes))
 	}
 	seen := make(map[string]bool)
 	for _, theme := range themes {
@@ -83,6 +83,14 @@ func TestThemeCyclesAndPersistsFromHostScreen(t *testing.T) {
 	cycleThemeFromPalette(m)
 	if m.config.Theme != themeCorporate || !strings.Contains(m.status, "Corporate") {
 		t.Fatalf("theme cycle did not wrap: id=%q status=%q", m.config.Theme, m.status)
+	}
+	cycleThemeFromPalette(m)
+	if m.config.Theme != themeSteam || !strings.Contains(m.status, "Steam") {
+		t.Fatalf("theme after Corporate: id=%q status=%q", m.config.Theme, m.status)
+	}
+	cycleThemeFromPalette(m)
+	if m.config.Theme != themeElysium || !strings.Contains(m.status, "Elysium") {
+		t.Fatalf("theme after Steam: id=%q status=%q", m.config.Theme, m.status)
 	}
 	cycleThemeFromPalette(m)
 	if m.config.Theme != themeMidnight || !strings.Contains(m.status, "Midnight") {

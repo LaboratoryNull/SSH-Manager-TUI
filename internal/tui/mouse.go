@@ -10,7 +10,7 @@ import (
 )
 
 var clickableHintLabels = []string{
-	"Ctrl+K", "Ctrl+N", "F1", "Esc k", "Esc b", "Esc x",
+	"Ctrl+K", "Ctrl+N", "F1", "Esc k", "Esc b", "Esc x", "Esc s", "Esc z", "Esc ←→",
 	"Shift+Insert/ПКМ", "⇧Ins/ПКМ", "Shift+Insert", "⇧Ins",
 	"Ctrl+Shift+Space", "Ctrl+Shift+1…9", "Ctrl+Shift+←/→", "Ctrl+Shift+P", "Ctrl+Shift+C",
 	"^⇧Space", "^⇧1…9", "^⇧←/→", "^⇧P",
@@ -53,6 +53,13 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if id, _, ok := m.paneAt(mouse.X, mouse.Y); ok && id != m.tabID {
+		// A click on another pane moves the focus there.
+		if _, index := m.tabStateByID(id); index >= 0 {
+			m.switchTab(index)
+		}
+		return m, nil
+	}
 	if m.page == pageConnected && m.reconnect == nil && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
 		if point, ok := m.terminalPointAt(mouse, false); ok {
 			m.filesFocused = false
@@ -211,6 +218,10 @@ func (m *Model) terminalPointAt(mouse tea.Mouse, clampOutside bool) (terminalPoi
 		originX = fileW + 1
 	}
 	originY := 3 // tab bar, outer border, then SSH title
+	if rect, ok := m.paneRectFor(m.tabID); ok && m.gridVisible() {
+		originX, originY = rect.x+1, rect.y+2
+		termWidth, termHeight = rect.termSize()
+	}
 	x, y := mouse.X-originX, mouse.Y-originY
 	inside := x >= 0 && x < termWidth && y >= 0 && y < termHeight
 	if !inside && !clampOutside {
@@ -331,7 +342,20 @@ func (m *Model) activateHint(label string) (tea.Model, tea.Cmd) {
 			m.openCommandPalette()
 			return m, nil
 		case "Esc b":
+			if m.inSplit(m.tabID) {
+				m.zoomedTab = m.tabID
+			}
 			m.toggleSFTP()
+			m.resizePanes()
+			return m, nil
+		case "Esc s":
+			m.openSplitPicker()
+			return m, nil
+		case "Esc z":
+			m.toggleZoom()
+			return m, nil
+		case "Esc ←→":
+			m.focusPane(1)
 			return m, nil
 		case "Esc x":
 			m.cancelTransfer()

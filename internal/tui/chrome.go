@@ -4,6 +4,11 @@ import (
 	"fmt"
 	"image/color"
 	"strings"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+
+	"ssh-manager-tui/internal/remote"
 
 	"charm.land/lipgloss/v2"
 )
@@ -59,10 +64,75 @@ func (m *Model) tabsView() string {
 }
 
 func (m *Model) tabBarHelp() string {
+	clock := barStyle().Foreground(textColor).Render(time.Now().Format("15:04") + "  ")
 	if m.appVersion == "" {
+		return clock
+	}
+	return clock + barStyle().Render("sshm "+m.appVersion+" ")
+}
+
+// uiTickMsg refreshes time-based readouts (clock, latency, session time)
+// while nothing else happens on screen.
+type uiTickMsg struct{}
+
+const uiTickInterval = 5 * time.Second
+
+func uiTick() tea.Cmd {
+	return tea.Tick(uiTickInterval, func(time.Time) tea.Msg { return uiTickMsg{} })
+}
+
+// telemetry is the live readout next to a session name: latency of the last
+// keepalive (colour-coded) and how long the session has been up.
+func telemetry(conn *remote.Connection) string {
+	if conn == nil {
 		return ""
 	}
-	return barStyle().Render("sshm " + m.appVersion + " ")
+	var parts []string
+	if rtt := conn.RTT(); rtt > 0 {
+		tone := successColor
+		switch {
+		case rtt >= 250*time.Millisecond:
+			tone = errorColor
+		case rtt >= 80*time.Millisecond:
+			tone = warningColor
+		}
+		parts = append(parts, lipgloss.NewStyle().Foreground(tone).Render(formatLatency(rtt)))
+	}
+	if uptime := conn.Uptime(); uptime > 0 {
+		parts = append(parts, lipgloss.NewStyle().Foreground(muted).Render(formatUptime(uptime)))
+	}
+	return strings.Join(parts, lipgloss.NewStyle().Foreground(borderMuted).Render(" · "))
+}
+
+func formatLatency(rtt time.Duration) string {
+	if rtt < time.Millisecond {
+		return "<1 мс"
+	}
+	return fmt.Sprintf("%d мс", rtt.Milliseconds())
+}
+
+func formatUptime(uptime time.Duration) string {
+	minutes := int(uptime.Minutes())
+	switch {
+	case minutes < 1:
+		return "<1 мин"
+	case minutes < 60:
+		return fmt.Sprintf("%d мин", minutes)
+	}
+	return fmt.Sprintf("%d ч %02d мин", minutes/60, minutes%60)
+}
+
+// withTelemetry right-aligns the readout in a title line of the given width;
+// it is dropped when there is no room.
+func withTelemetry(title, readout string, width int) string {
+	if readout == "" {
+		return title
+	}
+	gap := width - lipgloss.Width(title) - lipgloss.Width(readout) - 1
+	if gap < 2 {
+		return title
+	}
+	return title + strings.Repeat(" ", gap) + readout + " "
 }
 
 // tabStripOffset is where the first tab starts in the app bar.
