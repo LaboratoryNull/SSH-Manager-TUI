@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -620,7 +621,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if matchesPlatformShortcut(key, 'q', false) {
+	if matchesPlatformShortcut(key, 'q', false) && !m.terminalOwnsKeyboard() {
 		m.close()
 		return m, tea.Quit
 	}
@@ -656,7 +657,19 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// terminalOwnsKeyboard reports whether keys go to the remote shell. Then
+// Ctrl+W, Ctrl+T, Ctrl+B, Ctrl+Q, F1 and Alt+… belong to bash, nano, mc or
+// the router CLI; manager commands use the Esc prefix instead (like tmux).
+func (m *Model) terminalOwnsKeyboard() bool {
+	return m.page == pageConnected && !m.filesFocused && m.reconnect == nil && m.forwardModal == nil &&
+		m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil && m.passwordPrompt == nil &&
+		m.palette == nil && m.updateDialog == nil
+}
+
 func (m *Model) handleTabKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	if m.terminalOwnsKeyboard() {
+		return m, nil, false
+	}
 	if matchesPlatformShortcut(key, 't', false) {
 		m.openTab()
 		return m, nil, true
@@ -696,6 +709,53 @@ func (m *Model) handleTabKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		}
 	}
 	return m, nil, false
+}
+
+// handleEscapeCommand runs a manager command typed after Esc in a session.
+// Russian layout letters on the same keys work too.
+func (m *Model) handleEscapeCommand(key tea.KeyPressMsg) (bool, tea.Cmd) {
+	restore := func() { m.status = "Подключено" }
+	switch key.Keystroke() {
+	case "q", "й":
+		m.disconnect("Отключено")
+	case "k", "л":
+		restore()
+		m.openCommandPalette()
+	case "b", "и":
+		restore()
+		m.toggleSFTP()
+	case "t", "е":
+		restore()
+		m.openTab()
+	case "w", "ц":
+		restore()
+		m.closeActiveTab()
+	case "p", "з":
+		restore()
+		m.forwardModal = &forwardModal{}
+	case "x", "ч":
+		if !m.transferring {
+			return false, nil
+		}
+		restore()
+		m.cancelTransfer()
+	case "right", "tab":
+		restore()
+		m.switchTab((m.activeTab + 1) % len(m.tabs))
+	case "left", "shift+tab":
+		restore()
+		m.switchTab((m.activeTab - 1 + len(m.tabs)) % len(m.tabs))
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		index := int(key.Keystroke()[0] - '1')
+		if index >= len(m.tabs) {
+			return false, nil
+		}
+		restore()
+		m.switchTab(index)
+	default:
+		return false, nil
+	}
+	return true, nil
 }
 
 func (m *Model) toggleSFTP() {
@@ -819,7 +879,7 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.picker != nil {
 		return m.handlePickerKey(key)
 	}
-	if m.transferring && matchesPlatformShortcut(key, 'x', false) {
+	if m.transferring && m.filesFocused && matchesPlatformShortcut(key, 'x', false) {
 		m.cancelTransfer()
 		return m, nil
 	}
@@ -853,20 +913,10 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if s == "shift+insert" && !m.filesFocused {
 		return m, m.requestClipboardPaste()
 	}
-	if s == "f1" {
-		m.openCommandPalette()
-		return m, nil
-	}
 	if m.escapePending {
 		m.escapePending = false
-		if s == "q" {
-			m.disconnect("Отключено")
-			return m, nil
-		}
-		if s == "k" || s == "л" {
-			m.status = "Подключено"
-			m.openCommandPalette()
-			return m, nil
+		if handled, cmd := m.handleEscapeCommand(key); handled {
+			return m, cmd
 		}
 		if !m.filesFocused && m.conn != nil {
 			if err := m.conn.Send([]byte{0x1b}); err != nil {
@@ -877,13 +927,12 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if s == "esc" {
 		m.escapePending = true
 		m.escapeID++
-		m.status = "q — отключиться, k — команды"
+		m.status = "k — команды · b — файлы · t — вкладка · q — отключиться"
 		return m, escapeTimeoutCommand(m.tabID, m.escapeID)
 	}
-	if matchesPlatformFocusShortcut(key) || (runtime.GOOS != "darwin" && runtime.GOOS != "windows" && s == "ctrl+@") {
-		if m.sftpHidden {
-			return m, nil
-		}
+	// With the file panel hidden Ctrl+Space belongs to the remote program
+	// (set-mark in emacs/readline, next word in nano).
+	if !m.sftpHidden && (matchesPlatformFocusShortcut(key) || (runtime.GOOS != "darwin" && runtime.GOOS != "windows" && s == "ctrl+@")) {
 		m.filesFocused = !m.filesFocused
 		return m, nil
 	}
@@ -1264,15 +1313,14 @@ func (m *Model) placeCentered(content string) string {
 // connectedHints are shown on the status bar during a session; the bar drops
 // hints from the end when the window is narrow.
 func (m *Model) connectedHints() [][2]string {
-	keys := currentPlatformKeys()
 	if m.transferring {
-		return [][2]string{{keys.cancel, "Отменить передачу"}, {"F1", "Команды"}}
+		return [][2]string{{"Esc x", "Отменить передачу"}, {"Esc k", "Команды"}}
 	}
 	files := "Файлы"
 	if !m.sftpHidden {
 		files = "Скрыть файлы"
 	}
-	return [][2]string{{"F1", "Команды"}, {"Esc q", "Отключиться"}, {keys.toggleSFTP, files}}
+	return [][2]string{{"Esc k", "Команды"}, {"Esc b", files}, {"Esc q", "Отключиться"}}
 }
 
 func (m *Model) groupPromptView() string {
@@ -2753,14 +2801,66 @@ func keyBytesForMode(key tea.KeyPressMsg, applicationCursor bool) []byte {
 		}
 		return data
 	}
-	s := key.Keystroke()
-	if key.Mod.Contains(tea.ModCtrl) && len(s) == len("ctrl+x") {
-		c := byte(key.Code)
-		if c >= 'a' && c <= 'z' {
-			return []byte{c - 'a' + 1}
+	// Alt+key is sent as ESC followed by the key, like xterm's metaSendsEscape.
+	// Bubble Tea reports Alt combinations without text, so they were dropped
+	// before (nano's Alt+U undo, readline's Alt+B/F word movement).
+	if key.Mod.Contains(tea.ModAlt) {
+		plain := key
+		plain.Mod &^= tea.ModAlt
+		if base := keyBytesForMode(plain, applicationCursor); base != nil {
+			// Alt+arrows use xterm's modifier form (Alt = 3).
+			if len(base) == 3 && base[0] == 0x1b && (base[1] == '[' || base[1] == 'O') && base[2] >= 'A' && base[2] <= 'D' {
+				return []byte{0x1b, '[', '1', ';', '3', base[2]}
+			}
+			return append([]byte{0x1b}, base...)
+		}
+		if key.Code >= 0x20 && key.Code < utf8.RuneSelf && !key.Mod.Contains(tea.ModCtrl) {
+			r := key.Code
+			if key.Mod.Contains(tea.ModShift) {
+				r = unicode.ToUpper(r)
+				if key.ShiftedCode != 0 {
+					r = key.ShiftedCode
+				}
+			}
+			return []byte{0x1b, byte(r)}
+		}
+		return nil
+	}
+	if key.Mod.Contains(tea.ModCtrl) {
+		if c, ok := controlByte(key.Code); ok {
+			return []byte{c}
 		}
 	}
 	return nil
+}
+
+// controlByte maps Ctrl+key to the legacy C0 code xterm sends: letters,
+// and the punctuation nano and readline use (^\ replace, ^/ and ^_ go to
+// line, ^] complete, ^@/^Space set mark).
+func controlByte(code rune) (byte, bool) {
+	switch {
+	case code >= 'a' && code <= 'z':
+		return byte(code - 'a' + 1), true
+	case code >= 'A' && code <= 'Z':
+		return byte(code - 'A' + 1), true
+	}
+	switch code {
+	case '@', ' ', '2':
+		return 0x00, true
+	case '[', '3':
+		return 0x1b, true
+	case '\\', '4':
+		return 0x1c, true
+	case ']', '5':
+		return 0x1d, true
+	case '^', '~', '6':
+		return 0x1e, true
+	case '_', '/', '-', '7':
+		return 0x1f, true
+	case '?', '8':
+		return 0x7f, true
+	}
+	return 0, false
 }
 
 func currentUser() string {

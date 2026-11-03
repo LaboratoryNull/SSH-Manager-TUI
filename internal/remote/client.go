@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -29,8 +30,11 @@ type Connection struct {
 	Output  <-chan []byte
 	Home    string
 
-	closeOnce  sync.Once
-	netConn    net.Conn
+	closeOnce sync.Once
+	netConn   net.Conn
+	// received counts bytes read from the server; any inbound traffic
+	// proves the connection is alive even if a keepalive reply is late.
+	received   *atomic.Uint64
 	input      chan []byte
 	done       chan struct{}
 	failureMu  sync.Mutex
@@ -174,8 +178,7 @@ func connect(ctx context.Context, profile config.Session, width, height int, key
 		Timeout:         12 * time.Second,
 	}
 	address := net.JoinHostPort(profile.Host, fmt.Sprintf("%d", profile.Port))
-	dialer := net.Dialer{Timeout: 12 * time.Second}
-	netConn, err := dialer.DialContext(ctx, "tcp", address)
+	netConn, err := sshDialer().DialContext(ctx, "tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", address, err)
 	}
@@ -190,7 +193,8 @@ func connect(ctx context.Context, profile config.Session, width, height int, key
 		netConn.Close()
 		return nil, fmt.Errorf("set SSH handshake deadline: %w", err)
 	}
-	conn, chans, reqs, err := ssh.NewClientConn(netConn, address, clientConfig)
+	received := new(atomic.Uint64)
+	conn, chans, reqs, err := ssh.NewClientConn(countingConn{Conn: netConn, received: received}, address, clientConfig)
 	if err != nil {
 		netConn.Close()
 		if strings.Contains(err.Error(), "ssh: unable to authenticate") ||
@@ -200,7 +204,7 @@ func connect(ctx context.Context, profile config.Session, width, height int, key
 		return nil, fmt.Errorf("SSH handshake: %w", err)
 	}
 	sshClient := ssh.NewClient(conn, chans, reqs)
-	result := &Connection{SSH: sshClient, netConn: netConn, input: make(chan []byte, 256), done: make(chan struct{})}
+	result := &Connection{SSH: sshClient, netConn: netConn, received: received, input: make(chan []byte, 256), done: make(chan struct{})}
 	fail := func(err error) (*Connection, error) {
 		result.Close()
 		return nil, err
@@ -269,7 +273,7 @@ func connect(ctx context.Context, profile config.Session, width, height int, key
 	out := make(chan []byte, 128)
 	result.Output = out
 	go result.monitorOutput(out, stdout, stderr)
-	go result.keepalive()
+	go result.keepalive(keepaliveInterval, keepaliveTimeout)
 	return result, nil
 }
 
@@ -283,7 +287,7 @@ func TestKey(ctx context.Context, profile config.Session) error {
 		return err
 	}
 	address := net.JoinHostPort(profile.Host, fmt.Sprintf("%d", profile.Port))
-	netConn, err := (&net.Dialer{Timeout: 12 * time.Second}).DialContext(ctx, "tcp", address)
+	netConn, err := sshDialer().DialContext(ctx, "tcp", address)
 	if err != nil {
 		return err
 	}
@@ -370,32 +374,37 @@ func (c *Connection) monitorOutput(out chan<- []byte, readers ...io.Reader) {
 	close(out)
 }
 
-const (
+// Variables so tests can shorten them.
+var (
 	keepaliveInterval = 10 * time.Second
 	keepaliveTimeout  = 5 * time.Second
 )
 
-func (c *Connection) keepalive() {
+func (c *Connection) keepalive(interval, timeout time.Duration) {
 	if c.SSH == nil || c.netConn == nil || c.done == nil {
 		return
 	}
-	ticker := time.NewTicker(keepaliveInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	// answered records that the server has replied to a keepalive at least
+	// once. Some embedded servers (MikroTik RouterOS was reported) never
+	// answer "keepalive@openssh.com"; treating that silence as a dead link
+	// reconnected such sessions every ~15 seconds. For them SSH-level probes
+	// stop after the first unanswered one and the TCP keepalive configured
+	// in sshDialer detects dead peers instead.
+	answered := false
 	for {
 		select {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			// The reply is awaited with a timer instead of a socket deadline:
-			// a deadline on the shared connection also aborted unrelated
-			// writes (e.g. an SFTP upload stalled by TCP backpressure on a
-			// slow link) and killed otherwise healthy sessions.
+			before := c.receivedBytes()
 			reply := make(chan error, 1)
 			go func() {
 				_, _, err := c.SSH.SendRequest("keepalive@openssh.com", true, nil)
 				reply <- err
 			}()
-			timer := time.NewTimer(keepaliveTimeout)
+			timer := time.NewTimer(timeout)
 			select {
 			case err := <-reply:
 				timer.Stop()
@@ -403,15 +412,54 @@ func (c *Connection) keepalive() {
 					c.fail(fmt.Errorf("SSH keepalive: %w", err))
 					return
 				}
+				answered = true
 			case <-timer.C:
-				// fail closes the socket, which also unblocks SendRequest.
-				c.fail(errors.New("SSH keepalive: no reply from server"))
-				return
+				switch {
+				case !answered:
+					return
+				case c.receivedBytes() != before:
+					// The server is sending data, so the link is alive; the
+					// reply is just queued behind it.
+				default:
+					// fail closes the socket, which also unblocks SendRequest.
+					c.fail(errors.New("SSH keepalive: no reply from server"))
+					return
+				}
 			case <-c.done:
 				timer.Stop()
 				return
 			}
 		}
+	}
+}
+
+func (c *Connection) receivedBytes() uint64 {
+	if c.received == nil {
+		return 0
+	}
+	return c.received.Load()
+}
+
+// countingConn counts inbound bytes for the keepalive.
+type countingConn struct {
+	net.Conn
+	received *atomic.Uint64
+}
+
+func (c countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.received.Add(uint64(n))
+	return n, err
+}
+
+// sshDialer enables TCP keepalive with short probes, so a dead peer is
+// noticed in about 35 s even when the SSH server ignores SSH keepalives.
+func sshDialer() *net.Dialer {
+	return &net.Dialer{
+		Timeout: 12 * time.Second,
+		KeepAliveConfig: net.KeepAliveConfig{
+			Enable: true, Idle: 15 * time.Second, Interval: 5 * time.Second, Count: 4,
+		},
 	}
 }
 
