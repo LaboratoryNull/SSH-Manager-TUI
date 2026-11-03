@@ -1,14 +1,40 @@
 $ErrorActionPreference = "Stop"
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Invoke-WebRequest in Windows PowerShell 5.1 is many times slower while it
+# draws the progress bar.
+$ProgressPreference = "SilentlyContinue"
+# Add TLS 1.2 without dropping protocols that are already enabled.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $Repository = if ($env:SSHM_GITHUB_REPOSITORY) { $env:SSHM_GITHUB_REPOSITORY } else { "LaboratoryNull/SSH-Manager-TUI" }
 $Version = if ($env:SSHM_VERSION) { $env:SSHM_VERSION } else { "latest" }
 
-$Architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+# RuntimeInformation.OSArchitecture is missing or returns $null in Windows
+# PowerShell 5.1 on older .NET Framework builds, and calling .ToString() on it
+# failed with "You cannot call a method on a null-valued expression" (#2).
+# Use it when it works and fall back to the OS environment variables.
+# PROCESSOR_ARCHITEW6432 holds the real OS architecture inside a 32-bit
+# PowerShell on a 64-bit Windows.
+function Get-OSArchitecture {
+    try {
+        $Value = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+        if ($null -ne $Value) {
+            return "$Value".ToLowerInvariant()
+        }
+    } catch {
+    }
+    foreach ($Value in @($env:PROCESSOR_ARCHITEW6432, $env:PROCESSOR_ARCHITECTURE)) {
+        if ($Value) {
+            return "$Value".ToLowerInvariant()
+        }
+    }
+    return "unknown"
+}
+
+$Architecture = Get-OSArchitecture
 switch ($Architecture) {
-    "x64" { $ReleaseArchitecture = "amd64" }
+    { $_ -in @("x64", "amd64") } { $ReleaseArchitecture = "amd64" }
     "arm64" { $ReleaseArchitecture = "arm64" }
-    default { throw "Unsupported Windows architecture: $Architecture" }
+    default { throw "Unsupported Windows architecture: $Architecture. sshm is built for 64-bit Windows (x64 or ARM64)." }
 }
 
 $Asset = "sshm-windows-$ReleaseArchitecture.exe"
@@ -20,7 +46,8 @@ $DownloadBase = if ($Version -eq "latest") {
 $InstallDirectory = if ($env:SSHM_INSTALL_DIR) {
     $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:SSHM_INSTALL_DIR)
 } else {
-    Join-Path $env:LOCALAPPDATA "Programs\sshm"
+    $LocalAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [Environment]::GetFolderPath("LocalApplicationData") }
+    Join-Path $LocalAppData "Programs\sshm"
 }
 
 $TemporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("sshm-install-" + [guid]::NewGuid().ToString("N"))

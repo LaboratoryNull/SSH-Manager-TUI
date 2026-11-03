@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 )
 
 func TestFlattenTree(t *testing.T) {
@@ -148,5 +150,40 @@ func TestDroppedLocalPathsLeavesOrdinaryPasteAlone(t *testing.T) {
 		if paths, ok := droppedLocalPaths(content); ok {
 			t.Fatalf("ordinary paste %q recognized as %#v", content, paths)
 		}
+	}
+}
+
+func TestCompactSize(t *testing.T) {
+	for size, want := range map[int64]string{
+		0:             "0 B",
+		1023:          "1023 B",
+		1024:          "1.0 KB",
+		12 * 1024:     "12 KB",
+		10239:         "10 KB",
+		850 << 20:     "850 MB",
+		(1 << 20) - 1: "1.0 MB",
+		1503238553:    "1.4 GB",
+		5 << 40:       "5.0 TB",
+	} {
+		if got := compactSize(size); got != want {
+			t.Errorf("compactSize(%d) = %q, want %q", size, got, want)
+		}
+	}
+}
+
+func TestFileRowRightAlignsSize(t *testing.T) {
+	file := &fileNode{Name: "video.mp4", Size: 1503238553}
+	if got, want := fileRow("· video.mp4", file, 24), "· video.mp4       1.4 GB"; got != want {
+		t.Fatalf("fileRow = %q, want %q", got, want)
+	}
+	if got := fileRow("▸ docs", &fileNode{Name: "docs", Dir: true}, 24); strings.Contains(got, "B") {
+		t.Fatalf("directory row shows a size: %q", got)
+	}
+	long := fileRow("· a-very-long-file-name.tar.gz", &fileNode{Size: 850 << 20}, 20)
+	if lipgloss.Width(long) != 20 || !strings.HasSuffix(long, "850 MB") {
+		t.Fatalf("long row = %q (width %d)", long, lipgloss.Width(long))
+	}
+	if got := fileRow("· file.txt", &fileNode{Size: 12 * 1024}, 12); strings.Contains(got, "KB") {
+		t.Fatalf("narrow row should drop the size: %q", got)
 	}
 }
