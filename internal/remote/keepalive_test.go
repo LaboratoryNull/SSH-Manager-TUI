@@ -172,3 +172,17 @@ func TestKeepaliveDetectsServerThatStopsAnswering(t *testing.T) {
 		t.Fatal("a server that stopped answering keepalives was not detected")
 	}
 }
+
+func TestKeepaliveMeasuresRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	shortenKeepalive(t)
+	host, port, key := testServer(t, new(atomic.Bool))
+	conn := connectTest(t, host, port, key)
+	deadline := time.Now().Add(2 * time.Second)
+	for conn.RTT() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if conn.RTT() <= 0 || conn.Uptime() <= 0 {
+		t.Fatalf("rtt=%v uptime=%v", conn.RTT(), conn.Uptime())
+	}
+}

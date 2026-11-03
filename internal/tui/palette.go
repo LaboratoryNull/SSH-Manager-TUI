@@ -38,6 +38,7 @@ func withGroup(group string, actions []paletteAction) []paletteAction {
 }
 
 type commandPalette struct {
+	title   string
 	input   textinput.Model
 	cursor  int
 	actions []paletteAction
@@ -49,7 +50,7 @@ func (m *Model) openCommandPalette() {
 	input.Placeholder = "Что сделать?"
 	input.CharLimit = 64
 	input.Focus()
-	m.palette = &commandPalette{input: input, actions: m.paletteActions()}
+	m.palette = &commandPalette{title: "Команды", input: input, actions: m.paletteActions()}
 	m.escapePending = false
 }
 
@@ -85,9 +86,34 @@ func (m *Model) paletteActions() []paletteAction {
 		if !m.sftpHidden {
 			files = "Скрыть файлы"
 		}
-		actions := []paletteAction{
-			{title: files, shortcut: keys.toggleSFTP, run: func(m *Model) (tea.Model, tea.Cmd) { m.toggleSFTP(); return m, nil }},
+		actions := []paletteAction{}
+		if len(m.paneTabs) < maxPanes {
+			actions = append(actions, paletteAction{title: "Разделить экран: добавить терминал", shortcut: "Esc s", run: func(m *Model) (tea.Model, tea.Cmd) {
+				m.openSplitPicker()
+				return m, nil
+			}})
 		}
+		if m.paneIndex(m.tabID) >= 0 && len(m.paneTabs) >= 2 {
+			zoom := "Развернуть панель на весь экран"
+			if m.zoomedTab == m.tabID {
+				zoom = "Вернуть разделённый экран"
+			}
+			actions = append(actions,
+				paletteAction{title: zoom, shortcut: "Esc z", run: func(m *Model) (tea.Model, tea.Cmd) { m.toggleZoom(); return m, nil }},
+				paletteAction{title: "Убрать панель с экрана (сессия останется во вкладке)", run: func(m *Model) (tea.Model, tea.Cmd) {
+					m.detachPane()
+					return m, nil
+				}},
+			)
+		}
+		actions = append(actions, paletteAction{title: files, shortcut: keys.toggleSFTP, run: func(m *Model) (tea.Model, tea.Cmd) {
+			if m.inSplit(m.tabID) {
+				m.zoomedTab = m.tabID
+			}
+			m.toggleSFTP()
+			m.resizePanes()
+			return m, nil
+		}})
 		if !m.sftpHidden {
 			focus := "Перейти к файлам"
 			if m.filesFocused {
@@ -253,7 +279,7 @@ func (m *Model) paletteView() string {
 	grouped := strings.TrimSpace(palette.input.Value()) == ""
 
 	lines := []string{
-		titleStyle.Render("Команды"),
+		titleStyle.Render(palette.title),
 		"",
 		lipgloss.NewStyle().Foreground(accentAlt).Bold(true).Render("›") + "  " + palette.input.View(),
 		lipgloss.NewStyle().Foreground(borderMuted).Render(strings.Repeat("─", inner)),
@@ -272,7 +298,7 @@ func (m *Model) paletteView() string {
 			lines = append(lines, lipgloss.NewStyle().Foreground(muted).Bold(true).Render(" "+strings.ToUpper(action.group)))
 			previousGroup = action.group
 		}
-		shortcut := action.shortcut + " "
+		shortcut := ellipsize(action.shortcut, inner/2) + " "
 		title := truncate(action.title, inner-2-lipgloss.Width(shortcut)-1)
 		gap := max(1, inner-1-lipgloss.Width(title)-lipgloss.Width(shortcut))
 		if index == palette.cursor {

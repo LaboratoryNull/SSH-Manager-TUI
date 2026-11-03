@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
@@ -9,6 +10,8 @@ import (
 
 const (
 	themeCorporate = "corporate"
+	themeSteam     = "steam"
+	themeElysium   = "elysium"
 	themeMidnight  = "midnight"
 	themeAbyss     = "abyss"
 	themeSource    = "source"
@@ -30,6 +33,22 @@ var themes = []themeDefinition{
 		Background: "#161616", Accent: "#0F62FE", AccentAlt: "#78A9FF", AccentWarm: "#F4F4F4",
 		Text: "#F4F4F4", Muted: "#A8A8A8", Surface: "#262626", Border: "#4C4C4C", Contrast: "#FFFFFF",
 		Error: "#FA4D56", Success: "#42BE65", Warning: "#F1C21B",
+	},
+	{
+		// The Steam client: deep navy panels, steel-blue text and the light
+		// blue accent of its links and selections.
+		ID: themeSteam, Name: "Steam",
+		Background: "#171D25", Accent: "#66C0F4", AccentAlt: "#66C0F4", AccentWarm: "#FFFFFF",
+		Text: "#C7D5E0", Muted: "#8F98A0", Surface: "#1B2838", Border: "#2A475E", Contrast: "#0E141B",
+		Error: "#E5534B", Success: "#A4D007", Warning: "#E5B143",
+	},
+	{
+		// The orbital HUDs of "Elysium" (2013): near-black glass, cold white
+		// readouts, cyan wireframe accents and amber warnings.
+		ID: themeElysium, Name: "Elysium",
+		Background: "#070B10", Accent: "#2BD3F0", AccentAlt: "#8BE9F8", AccentWarm: "#2BD3F0",
+		Text: "#E4F2F7", Muted: "#7C93A1", Surface: "#0F1820", Border: "#24414F", Contrast: "#03121A",
+		Error: "#FF5D5D", Success: "#3DDC97", Warning: "#FFB547",
 	},
 	{
 		ID: themeMidnight, Name: "Midnight",
@@ -106,11 +125,15 @@ func applyTheme(id string) {
 	subtitleStyle = lipgloss.NewStyle().Foreground(accentAlt)
 	selectedStyle = lipgloss.NewStyle().Background(surface).Foreground(textColor).Bold(true)
 	keyStyle = lipgloss.NewStyle().Foreground(accentAlt).Background(surface).Padding(0, 1).Bold(true)
-	if theme.ID == themeCorporate {
+	if theme.ID == themeCorporate || theme.ID == themeSteam || theme.ID == themeElysium {
 		borderStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(borderMuted)
 		subtitleStyle = lipgloss.NewStyle().Foreground(muted)
 		selectedStyle = lipgloss.NewStyle().Background(accent).Foreground(contrastText).Bold(true)
 		keyStyle = lipgloss.NewStyle().Foreground(textColor).Background(surface).Padding(0, 1).Bold(true)
+	}
+	if theme.ID == themeElysium {
+		// HUD headings: cyan capitals.
+		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(accent).Transform(strings.ToUpper)
 	}
 	sizeStyle = lipgloss.NewStyle().Foreground(warningColor).Background(surface)
 }
