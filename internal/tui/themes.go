@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	themeMidnight = "midnight"
-	themeAbyss    = "abyss"
-	themeSource   = "source"
-	themeWin98    = "win98-dark"
+	themeCorporate = "corporate"
+	themeMidnight  = "midnight"
+	themeAbyss     = "abyss"
+	themeSource    = "source"
+	themeWin98     = "win98-dark"
 )
 
 type themeDefinition struct {
@@ -22,6 +23,14 @@ type themeDefinition struct {
 }
 
 var themes = []themeDefinition{
+	{
+		// Restrained enterprise palette in the spirit of IBM Carbon (Gray 100):
+		// graphite surfaces, one blue accent, white titles, square corners.
+		ID: themeCorporate, Name: "Corporate",
+		Background: "#161616", Accent: "#0F62FE", AccentAlt: "#78A9FF", AccentWarm: "#F4F4F4",
+		Text: "#F4F4F4", Muted: "#A8A8A8", Surface: "#262626", Border: "#4C4C4C", Contrast: "#FFFFFF",
+		Error: "#FA4D56", Success: "#42BE65", Warning: "#F1C21B",
+	},
 	{
 		ID: themeMidnight, Name: "Midnight",
 		Background: "#11111B", Accent: "#7D56F4", AccentAlt: "#5AF7DC", AccentWarm: "#FF75B7",
@@ -48,8 +57,11 @@ var themes = []themeDefinition{
 	},
 }
 
+// defaultTheme is used for new installations and unknown stored themes.
+const defaultTheme = themeCorporate
+
 func init() {
-	applyTheme(themeMidnight)
+	applyTheme(defaultTheme)
 }
 
 func normalizedThemeID(id string) string {
@@ -58,7 +70,7 @@ func normalizedThemeID(id string) string {
 			return id
 		}
 	}
-	return themeMidnight
+	return defaultTheme
 }
 
 func themeByID(id string) themeDefinition {
@@ -94,6 +106,12 @@ func applyTheme(id string) {
 	subtitleStyle = lipgloss.NewStyle().Foreground(accentAlt)
 	selectedStyle = lipgloss.NewStyle().Background(surface).Foreground(textColor).Bold(true)
 	keyStyle = lipgloss.NewStyle().Foreground(accentAlt).Background(surface).Padding(0, 1).Bold(true)
+	if theme.ID == themeCorporate {
+		borderStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(borderMuted)
+		subtitleStyle = lipgloss.NewStyle().Foreground(muted)
+		selectedStyle = lipgloss.NewStyle().Background(accent).Foreground(contrastText).Bold(true)
+		keyStyle = lipgloss.NewStyle().Foreground(textColor).Background(surface).Padding(0, 1).Bold(true)
+	}
 	sizeStyle = lipgloss.NewStyle().Foreground(warningColor).Background(surface)
 }
 

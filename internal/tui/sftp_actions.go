@@ -289,7 +289,7 @@ func (m *Model) sftpActionView() string {
 	}
 	boxWidth := min(86, max(38, m.width-6))
 	innerWidth := max(20, boxWidth-6)
-	lines := []string{titleStyle.Render("◆ " + sftpActionLabel(dialog.action)), ""}
+	lines := []string{titleStyle.Render(sftpActionLabel(dialog.action)), ""}
 	if dialog.action == sftpActionMkdir {
 		lines = append(lines,
 			lipgloss.NewStyle().Foreground(muted).Render("Родительский каталог"),

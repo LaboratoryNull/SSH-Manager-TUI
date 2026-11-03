@@ -19,7 +19,22 @@ const paletteVisibleRows = 10
 type paletteAction struct {
 	title    string
 	shortcut string
+	group    string
 	run      func(m *Model) (tea.Model, tea.Cmd)
+}
+
+const (
+	paletteGroupServer  = "Сервер"
+	paletteGroupSession = "Сессия"
+	paletteGroupGeneral = "Общее"
+	paletteGroupApp     = "Приложение"
+)
+
+func withGroup(group string, actions []paletteAction) []paletteAction {
+	for index := range actions {
+		actions[index].group = group
+	}
+	return actions
 }
 
 type commandPalette struct {
@@ -84,6 +99,26 @@ func (m *Model) paletteActions() []paletteAction {
 					m.filesFocused = true
 					return m, m.openDownloadPicker()
 				}},
+				paletteAction{title: "Обновить список файлов", shortcut: "F5", run: func(m *Model) (tea.Model, tea.Cmd) {
+					m.filesFocused = true
+					return m, m.reloadSelectedDirectory()
+				}},
+				paletteAction{title: "Новая папка", shortcut: "n", run: func(m *Model) (tea.Model, tea.Cmd) {
+					m.filesFocused = true
+					return m, m.openSFTPAction(sftpActionMkdir)
+				}},
+				paletteAction{title: "Копировать на сервере", shortcut: "c", run: func(m *Model) (tea.Model, tea.Cmd) {
+					m.filesFocused = true
+					return m, m.openSFTPAction(sftpActionCopy)
+				}},
+				paletteAction{title: "Переместить или переименовать", shortcut: "m", run: func(m *Model) (tea.Model, tea.Cmd) {
+					m.filesFocused = true
+					return m, m.openSFTPAction(sftpActionMove)
+				}},
+				paletteAction{title: "Удалить файл или папку", shortcut: "Del", run: func(m *Model) (tea.Model, tea.Cmd) {
+					m.filesFocused = true
+					return m, m.openSFTPAction(sftpActionDelete)
+				}},
 			)
 		}
 		actions = append(actions,
@@ -104,7 +139,7 @@ func (m *Model) paletteActions() []paletteAction {
 				return m, nil
 			}},
 		)
-		return append(actions, common...)
+		return append(withGroup(paletteGroupSession, actions), withGroup(paletteGroupApp, common)...)
 	}
 
 	var actions []paletteAction
@@ -129,17 +164,18 @@ func (m *Model) paletteActions() []paletteAction {
 			}})
 		}
 	}
-	actions = append(actions,
-		paletteAction{title: "Новый сервер", shortcut: "Ctrl+N", run: func(m *Model) (tea.Model, tea.Cmd) { m.openNewSessionForm(); return m, nil }},
-		paletteAction{title: "Профили пользователей", run: func(m *Model) (tea.Model, tea.Cmd) {
+	actions = withGroup(paletteGroupServer, actions)
+	actions = append(actions, withGroup(paletteGroupGeneral, []paletteAction{
+		{title: "Новый сервер", shortcut: "Ctrl+N", run: func(m *Model) (tea.Model, tea.Cmd) { m.openNewSessionForm(); return m, nil }},
+		{title: "Профили пользователей", run: func(m *Model) (tea.Model, tea.Cmd) {
 			m.profileManager = &profileManager{}
 			return m, nil
 		}},
-		paletteAction{title: "Импорт из истории с настройкой групп", run: func(m *Model) (tea.Model, tea.Cmd) {
+		{title: "Импорт из истории с настройкой групп", run: func(m *Model) (tea.Model, tea.Cmd) {
 			return m, m.openHistoryImport()
 		}},
-	)
-	return append(actions, common...)
+	})...)
+	return append(actions, withGroup(paletteGroupApp, common)...)
 }
 
 func (p *commandPalette) filtered() []paletteAction {
@@ -207,8 +243,11 @@ func (m *Model) paletteView() string {
 	styleSearch(&palette.input, inner-3)
 	actions := palette.filtered()
 	palette.cursor = clamp(palette.cursor, 0, max(0, len(actions)-1))
+	grouped := strings.TrimSpace(palette.input.Value()) == ""
 
 	lines := []string{
+		titleStyle.Render("Команды"),
+		"",
 		lipgloss.NewStyle().Foreground(accentAlt).Bold(true).Render("›") + "  " + palette.input.View(),
 		lipgloss.NewStyle().Foreground(borderMuted).Render(strings.Repeat("─", inner)),
 	}
@@ -216,8 +255,16 @@ func (m *Model) paletteView() string {
 	if palette.cursor >= paletteVisibleRows {
 		start = palette.cursor - paletteVisibleRows + 1
 	}
+	previousGroup := ""
 	for index := start; index < min(len(actions), start+paletteVisibleRows); index++ {
 		action := actions[index]
+		if grouped && action.group != previousGroup {
+			if previousGroup != "" {
+				lines = append(lines, "")
+			}
+			lines = append(lines, lipgloss.NewStyle().Foreground(muted).Bold(true).Render(" "+strings.ToUpper(action.group)))
+			previousGroup = action.group
+		}
 		shortcut := action.shortcut + " "
 		title := truncate(action.title, inner-2-lipgloss.Width(shortcut)-1)
 		gap := max(1, inner-1-lipgloss.Width(title)-lipgloss.Width(shortcut))
@@ -232,8 +279,10 @@ func (m *Model) paletteView() string {
 	if len(actions) == 0 {
 		lines = append(lines, lipgloss.NewStyle().Foreground(muted).Render(" Нет такой команды"))
 	}
-	lines = padLines(lines, 2+min(paletteVisibleRows, max(1, len(palette.actions))))
-	lines = append(lines, "", hintsView(inner, [][2]string{{"Enter", "Выполнить"}, {"Esc", "Закрыть"}}))
+	// Keep the box from shrinking while typing so it does not jump around.
+	for minimum := 4 + min(paletteVisibleRows, len(palette.actions)); len(lines) < minimum; {
+		lines = append(lines, "")
+	}
 	box := borderStyle.Copy().BorderForeground(accent).Padding(1, 2).Width(boxWidth).Render(strings.Join(lines, "\n"))
 	return m.placeCentered(box)
 }

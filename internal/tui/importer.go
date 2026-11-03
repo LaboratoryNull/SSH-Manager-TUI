@@ -277,7 +277,7 @@ func (m *Model) importView() string {
 	boxWidth := min(104, max(46, m.width-4))
 	boxHeight := min(32, max(16, m.contentHeight()-2))
 	inner := max(20, boxWidth-6)
-	lines := []string{titleStyle.Render("◆ Автоимпорт SSH history"), subtitleStyle.Render("Выберите хосты и назначьте профиль/группу"), ""}
+	lines := []string{titleStyle.Render("Импорт из истории"), subtitleStyle.Render("Выберите хосты и назначьте профиль/группу"), ""}
 	if wizard.loading {
 		lines = append(lines, lipgloss.NewStyle().Foreground(muted).Render("Чтение Bash, Zsh и Fish history…"))
 	} else if wizard.groupInput != nil {
