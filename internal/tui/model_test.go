@@ -156,20 +156,46 @@ func TestTransferHotkeysNoLongerNeedShift(t *testing.T) {
 	}
 }
 
-func TestTransferCanBeCancelledWithCtrlX(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	m := &Model{page: pageConnected, transferring: true, transferCancel: cancel}
-	_, cmd := m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'x', Mod: tea.ModCtrl}))
-	if cmd != nil {
-		t.Fatal("cancellation should not start another command")
+func TestTransferCanBeCancelledWithEscXOrCtrlXInFiles(t *testing.T) {
+	escX := func(m *Model) {
+		m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+		m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'x', Text: "x"}))
 	}
-	select {
-	case <-ctx.Done():
-	default:
-		t.Fatal("transfer context was not cancelled")
+	ctrlXInFiles := func(m *Model) {
+		m.filesFocused = true
+		m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'x', Mod: tea.ModCtrl}))
 	}
-	if !strings.Contains(m.status, "Отмена") {
-		t.Fatalf("status = %q", m.status)
+	for name, press := range map[string]func(*Model){"Esc x": escX, "Ctrl+X in files": ctrlXInFiles} {
+		ctx, cancel := context.WithCancel(context.Background())
+		m := &Model{page: pageConnected, transferring: true, transferCancel: cancel, sftpHidden: false}
+		press(m)
+		select {
+		case <-ctx.Done():
+		default:
+			t.Fatalf("%s: transfer context was not cancelled", name)
+		}
+		if !strings.Contains(m.status, "Отмена") {
+			t.Fatalf("%s: status = %q", name, m.status)
+		}
+	}
+}
+
+func TestShellKeysReachTheTerminal(t *testing.T) {
+	// Ctrl+W (delete word / nano search), Ctrl+T, Ctrl+B, Ctrl+Q, Alt+P and
+	// F1 belong to the remote program while the terminal has focus.
+	m := &Model{width: 100, height: 30, page: pageConnected, sftpHidden: true, tabID: 1}
+	m.tabs = []*tabState{m.captureTab()}
+	for _, key := range []tea.Key{
+		{Code: 'w', Mod: tea.ModCtrl}, {Code: 't', Mod: tea.ModCtrl}, {Code: 'b', Mod: tea.ModCtrl},
+		{Code: 'q', Mod: tea.ModCtrl}, {Code: 'p', Mod: tea.ModAlt}, {Code: tea.KeyF1},
+	} {
+		if _, _, handled := m.handleTabKey(tea.KeyPressMsg(key)); handled {
+			t.Fatalf("%v was taken by the manager", tea.KeyPressMsg(key))
+		}
+		_, cmd := m.handleKey(tea.KeyPressMsg(key))
+		if cmd != nil || len(m.tabs) != 1 || m.forwardModal != nil || m.palette != nil || !m.sftpHidden {
+			t.Fatalf("%v ran a manager command", tea.KeyPressMsg(key))
+		}
 	}
 }
 
@@ -362,14 +388,19 @@ func TestCtrlBTogglesSFTPPanel(t *testing.T) {
 	}
 }
 
-func TestCtrlBFocusesSFTPWhenPanelOpens(t *testing.T) {
+func TestEscBTogglesFilesAndFocusesThem(t *testing.T) {
 	m := &Model{width: 100, height: 30, page: pageConnected, sftpHidden: true, filesFocused: false}
-	_, _, handled := m.handleTabKey(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
-	if !handled || m.sftpHidden || !m.filesFocused {
+	escB := func() {
+		m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+		m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'b', Text: "b"}))
+	}
+	escB()
+	if m.sftpHidden || !m.filesFocused {
 		t.Fatalf("opened SFTP state = hidden:%v focused:%v", m.sftpHidden, m.filesFocused)
 	}
-	_, _, _ = m.handleTabKey(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
-	if !m.sftpHidden || m.filesFocused {
+	// With the files focused the regular Ctrl+B shortcut works again.
+	_, _, handled := m.handleTabKey(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
+	if !handled || !m.sftpHidden || m.filesFocused {
 		t.Fatalf("closed SFTP state = hidden:%v focused:%v", m.sftpHidden, m.filesFocused)
 	}
 }
@@ -897,11 +928,12 @@ func TestForwardEditorPersistsDefinition(t *testing.T) {
 	}
 }
 
-func TestAltPOpensForwardModal(t *testing.T) {
+func TestEscPOpensForwardModal(t *testing.T) {
 	m := &Model{page: pageConnected}
-	_, _, handled := m.handleTabKey(tea.KeyPressMsg(tea.Key{Code: 'p', Mod: tea.ModAlt}))
-	if !handled || m.forwardModal == nil {
-		t.Fatal("Alt+P did not open the port forward modal")
+	m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	m.handleConnectedKey(tea.KeyPressMsg(tea.Key{Code: 'p', Text: "p"}))
+	if m.forwardModal == nil {
+		t.Fatal("Esc p did not open the port forward modal")
 	}
 }
 

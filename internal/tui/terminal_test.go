@@ -291,3 +291,38 @@ func TestCoalesceOutputMergesPendingChunks(t *testing.T) {
 		t.Fatal("closed channel must still report closure to the next reader")
 	}
 }
+
+func TestRepeatPreviousCharacter(t *testing.T) {
+	// ncurses (nano, mc) fills gaps with "<char> CSI n-1 b".
+	s := newTerminalScreen(20, 2)
+	s.Feed([]byte("^K Cut \x1b[5b^T Exec"))
+	if got := strings.Split(s.String(), "\n")[0]; got != "^K Cut      ^T Exec" {
+		t.Fatalf("REP line = %q", got)
+	}
+	s.Feed([]byte("\x1b[2;5H\x1b[Zx\x1b[Iy"))
+	if got := strings.Split(s.String(), "\n")[1]; got != "x       y" {
+		t.Fatalf("tab line = %q", got)
+	}
+}
+
+func TestKeyBytesForAltAndControlPunctuation(t *testing.T) {
+	cases := []struct {
+		key  tea.Key
+		want string
+	}{
+		{tea.Key{Code: 'u', Mod: tea.ModAlt}, "\x1bu"},                  // nano undo
+		{tea.Key{Code: 'u', Mod: tea.ModAlt | tea.ModShift}, "\x1bU"},   // shifted Alt
+		{tea.Key{Code: 'x', Mod: tea.ModAlt | tea.ModCtrl}, "\x1b\x18"}, // Ctrl+Alt+X
+		{tea.Key{Code: tea.KeyUp, Mod: tea.ModAlt}, "\x1b[1;3A"},        // Alt+Up
+		{tea.Key{Code: '\\', Mod: tea.ModCtrl}, "\x1c"},                 // nano ^\ replace
+		{tea.Key{Code: '/', Mod: tea.ModCtrl}, "\x1f"},                  // nano ^/ go to line
+		{tea.Key{Code: ']', Mod: tea.ModCtrl}, "\x1d"},
+		{tea.Key{Code: tea.KeySpace, Mod: tea.ModCtrl}, "\x00"}, // set mark
+		{tea.Key{Code: 'w', Mod: tea.ModCtrl}, "\x17"},
+	}
+	for _, tc := range cases {
+		if got := string(keyBytesForMode(tea.KeyPressMsg(tc.key), false)); got != tc.want {
+			t.Errorf("%v: got %q, want %q", tea.KeyPressMsg(tc.key), got, tc.want)
+		}
+	}
+}

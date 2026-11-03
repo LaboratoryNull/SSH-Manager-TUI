@@ -10,7 +10,7 @@ import (
 )
 
 var clickableHintLabels = []string{
-	"Ctrl+K", "Ctrl+N", "F1",
+	"Ctrl+K", "Ctrl+N", "F1", "Esc k", "Esc b", "Esc x",
 	"Shift+Insert/ПКМ", "⇧Ins/ПКМ", "Shift+Insert", "⇧Ins",
 	"Ctrl+Shift+Space", "Ctrl+Shift+1…9", "Ctrl+Shift+←/→", "Ctrl+Shift+P", "Ctrl+Shift+C",
 	"^⇧Space", "^⇧1…9", "^⇧←/→", "^⇧P",
@@ -327,8 +327,14 @@ func (m *Model) activateHint(label string) (tea.Model, tea.Cmd) {
 	}
 	if !platformHint {
 		switch label {
-		case "Ctrl+K", "F1":
+		case "Ctrl+K", "F1", "Esc k":
 			m.openCommandPalette()
+			return m, nil
+		case "Esc b":
+			m.toggleSFTP()
+			return m, nil
+		case "Esc x":
+			m.cancelTransfer()
 			return m, nil
 		case "Ctrl+N":
 			if m.page == pageSessions {

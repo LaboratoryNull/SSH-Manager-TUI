@@ -11,8 +11,8 @@ import (
 // The command palette replaces long rows of key hints: every action of the
 // current screen is one search away, with its shortcut shown next to it so
 // frequent users learn the keys naturally. Ctrl+K opens it on the host
-// screen; in a terminal (where Ctrl+K belongs to the shell) it is F1 or Esc
-// followed by K.
+// screen; in a session every Ctrl and F key belongs to the remote program,
+// so it is Esc followed by K.
 
 const paletteVisibleRows = 10
 
@@ -55,6 +55,13 @@ func (m *Model) openCommandPalette() {
 
 func (m *Model) paletteActions() []paletteAction {
 	keys := currentPlatformKeys()
+	inSession := m.page == pageConnected
+	if inSession {
+		// In a session the Ctrl shortcuts reach the server; the manager's
+		// own commands are typed after Esc.
+		keys.newTab, keys.closeTab, keys.tabs, keys.quit = "Esc t", "Esc w", "Esc →", ""
+		keys.toggleSFTP, keys.ports = "Esc b", "Esc p"
+	}
 	themeTitle := "Сменить тему · сейчас " + currentThemeName(m.config.Theme)
 	common := []paletteAction{
 		{title: "Новая вкладка", shortcut: keys.newTab, run: func(m *Model) (tea.Model, tea.Cmd) { m.openTab(); return m, nil }},

@@ -112,6 +112,8 @@ type terminalScreen struct {
 	primary           *terminalSnapshot
 	responses         [][]byte
 	currentDir        string
+	// lastGraphic is the last printed character, repeated by CSI b (REP).
+	lastGraphic rune
 }
 
 const terminalHistoryLimit = 10_000
@@ -433,6 +435,7 @@ func (t *terminalScreen) SelectionText(selection *terminalSelection) string {
 }
 
 func (t *terminalScreen) put(r rune) {
+	t.lastGraphic = r
 	if (t.useG1 && t.g1Graphics) || (!t.useG1 && t.g0Graphics) {
 		r = decSpecialRune(r)
 	}
@@ -563,6 +566,23 @@ func (t *terminalScreen) applyCSI(final byte, raw string) {
 		t.cx = min(t.w-1, t.cx+arg(0, 1))
 	case 'D':
 		t.cx = max(0, t.cx-arg(0, 1))
+	case 'b':
+		// REP: xterm-256color terminfo declares it, and ncurses programs
+		// such as nano print one space and repeat it to fill gaps. Without
+		// it title bars and the shortcut list collapsed into each other.
+		if t.lastGraphic != 0 {
+			for range min(arg(0, 1), t.w*t.h) {
+				t.put(t.lastGraphic)
+			}
+		}
+	case 'I':
+		for range arg(0, 1) {
+			t.cx = min(((t.cx/8)+1)*8, t.w-1)
+		}
+	case 'Z':
+		for range arg(0, 1) {
+			t.cx = max(0, ((t.cx-1)/8)*8)
+		}
 	case 'E':
 		t.cy, t.cx = min(t.scrollBottomIfOrigin(), t.cy+arg(0, 1)), 0
 	case 'F':

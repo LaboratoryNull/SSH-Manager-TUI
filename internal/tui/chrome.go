@@ -211,11 +211,11 @@ func (m *Model) browseRowsForSummary() []launchRow {
 func (m *Model) fileHints() [][2]string {
 	keys := currentPlatformKeys()
 	if m.transferring {
-		return [][2]string{{keys.cancel, "Отменить передачу"}, {"F1", "Команды"}}
+		return [][2]string{{keys.cancel, "Отменить передачу"}, {"Esc k", "Команды"}}
 	}
 	return [][2]string{
-		{keys.download, "Скачать"}, {keys.upload, "Загрузить"}, {"F1", "Команды"},
-		{"Del", "Удалить"}, {"F5", "Обновить"}, {keys.focus, "Терминал"},
+		{keys.download, "Скачать"}, {keys.upload, "Загрузить"}, {"F5", "Обновить"},
+		{"Del", "Удалить"}, {"Esc k", "Команды"}, {keys.focus, "Терминал"},
 	}
 }
 
