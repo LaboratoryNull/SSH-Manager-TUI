@@ -89,3 +89,57 @@ func TestAuthenticationErrorCanBeIdentifiedThroughWrapping(t *testing.T) {
 		t.Fatal("network error was identified as an authentication failure")
 	}
 }
+
+func TestPreferredHostKeyAlgorithmsPutsKnownKeyTypesFirst(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	address := &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 22}
+	callback, err := hostKeyCallback()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := preferredHostKeyAlgorithms(callback, "example.test:22", address); got != nil {
+		t.Fatalf("unknown host algorithms = %v, want defaults (nil)", got)
+	}
+
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := ssh.NewPublicKey(public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unknown *HostKeyMismatchError
+	if !errors.As(callback("example.test:22", address, key), &unknown) {
+		t.Fatal("expected unknown host error")
+	}
+	if err := AcceptHostKey(unknown); err != nil {
+		t.Fatal(err)
+	}
+	callback, err = hostKeyCallback()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := preferredHostKeyAlgorithms(callback, "example.test:22", address)
+	if len(got) == 0 || got[0] != ssh.KeyAlgoED25519 {
+		t.Fatalf("algorithms = %v, want %s first", got, ssh.KeyAlgoED25519)
+	}
+	if len(got) != len(ssh.SupportedAlgorithms().HostKeys) {
+		t.Fatalf("algorithms = %v, want every supported algorithm once", got)
+	}
+}
+
+func TestExpandHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for input, want := range map[string]string{
+		"~":           home,
+		"~/.ssh/id":   home + "/.ssh/id",
+		"/etc/key":    "/etc/key",
+		"~other/file": "~other/file",
+	} {
+		if got := expandHome(input); got != want {
+			t.Errorf("expandHome(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
