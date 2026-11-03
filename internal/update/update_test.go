@@ -195,3 +195,24 @@ func TestReplaceByRenameSwapsAndRollsBack(t *testing.T) {
 		t.Fatalf("target after rollback = %q", got)
 	}
 }
+
+func TestReplaceByRenameWorksWhenOldLeftoverIsBusy(t *testing.T) {
+	direct := func(operation func() error) error { return operation() }
+	directory := t.TempDir()
+	target := filepath.Join(directory, "sshm.exe")
+	source := filepath.Join(directory, ".sshm-update-2")
+	_ = os.WriteFile(target, []byte("old"), 0o755)
+	_ = os.WriteFile(source, []byte("new"), 0o755)
+	// A non-empty directory cannot be removed, standing in for a .old file
+	// that is still locked by an open window of an earlier version.
+	busy := target + previousSuffix
+	if err := os.MkdirAll(filepath.Join(busy, "locked"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceByRename(source, target, direct); err != nil {
+		t.Fatalf("replace with a busy leftover: %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "new" {
+		t.Fatalf("target = %q", got)
+	}
+}

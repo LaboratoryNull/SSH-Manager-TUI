@@ -48,6 +48,67 @@ jobs:
       - name: Test
         run: go test ./internal/update/ ./internal/config/
 
+  windows-update:
+    name: Windows update end to end
+    needs: windows
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # "sshm update" replaces its own running sshm.exe from a manifest served
+      # on localhost, while another window of the same file is open.
+      - name: Console update replaces the running executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP 'sshm-e2e'
+          New-Item -ItemType Directory -Force "$work\app", "$work\srv" | Out-Null
+          go build -o "$work\app\sshm.exe" -ldflags "-X main.version=v0.0.1" .
+          go build -o "$work\srv\sshm-windows-amd64.exe" -ldflags "-X main.version=v9.9.9" .
+          $artifact = Get-Item "$work\srv\sshm-windows-amd64.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 $artifact.FullName).Hash.ToLowerInvariant()
+          $manifest = @{ version = 'v9.9.9'; artifacts = @{ 'windows-amd64' = @{
+            url = 'http://127.0.0.1:8765/sshm-windows-amd64.exe'; sha256 = $hash; size = $artifact.Length } } }
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding ascii "$work\srv\manifest.json"
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', "$work\srv" -PassThru -WindowStyle Hidden
+          $open = Start-Process "$work\app\sshm.exe" -PassThru
+          Start-Sleep -Seconds 3
+          Write-Host "second window still running: $(-not $open.HasExited)"
+          $env:SSHM_UPDATE_URL = 'http://127.0.0.1:8765/manifest.json'
+          & "$work\app\sshm.exe" update
+          if ($LASTEXITCODE -ne 0) { throw "sshm update exited with $LASTEXITCODE" }
+          $version = & "$work\app\sshm.exe" version
+          Write-Host $version
+          if ($version -notmatch 'v9\.9\.9') { throw "executable was not replaced: $version" }
+          Stop-Process -Id $open.Id -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+
+      # The installer from this commit (Windows PowerShell 5.1) reinstalls over
+      # an sshm.exe that is running in another window.
+      - name: Installer works while sshm is running
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:SSHM_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'sshm-install'
+          & .\scripts\install-windows.ps1
+          $installed = Join-Path $env:SSHM_INSTALL_DIR 'sshm.exe'
+          $open = Start-Process $installed -PassThru
+          Start-Sleep -Seconds 3
+          Write-Host "installed copy running: $(-not $open.HasExited)"
+          $env:SSHM_VERSION = 'v1.1.1'
+          & .\scripts\install-windows.ps1
+          $version = & $installed version
+          Write-Host $version
+          if ($version -notmatch 'v1\.1\.1') { throw "reinstall did not replace the binary: $version" }
+          Stop-Process -Id $open.Id -Force -ErrorAction SilentlyContinue
+
   cross-build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     needs: quality
