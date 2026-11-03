@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -59,7 +60,8 @@ func TestRunDownloadsVerifiesAndAtomicallyReplacesExecutable(t *testing.T) {
 	if string(got) != string(newBinary) {
 		t.Fatalf("installed binary = %q", got)
 	}
-	if info, err := os.Stat(target); err != nil || info.Mode().Perm()&0o111 == 0 {
+	// Windows has no executable bit; Unix must keep the binary runnable.
+	if info, err := os.Stat(target); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm()&0o111 == 0) {
 		t.Fatalf("updated executable mode = %v, err = %v", info.Mode(), err)
 	}
 }
