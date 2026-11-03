@@ -30,6 +30,24 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+  windows:
+    name: Windows tests
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      # Self-update must replace the running sshm.exe, which only Windows
+      # locks; this guards the in-app update path.
+      - name: Test
+        run: go test ./internal/update/ ./internal/config/
+
   cross-build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     needs: quality

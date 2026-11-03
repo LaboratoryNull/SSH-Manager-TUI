@@ -118,6 +118,7 @@ func printHelp() {
 }
 
 func runTUI() {
+	update.CleanupPreviousUpdate()
 	store, err := config.NewStore()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "configuration error:", err)
