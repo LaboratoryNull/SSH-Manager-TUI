@@ -3,6 +3,9 @@ package update
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
+	"time"
 )
 
 // previousSuffix marks the executable that an update moved aside.
@@ -14,10 +17,11 @@ const previousSuffix = ".old"
 // everywhere.
 func replaceByRename(source, target string, retry func(func() error) error) error {
 	previous := target + previousSuffix
-	// A leftover from an earlier update; it is not running any more unless
-	// another old window is still open, in which case the rename below
-	// reports the problem.
-	_ = os.Remove(previous)
+	// A leftover from an earlier update. If a window of that version is
+	// still open, Windows keeps it locked; use a unique name instead.
+	if err := os.Remove(previous); err != nil && !os.IsNotExist(err) {
+		previous += "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
 	if err := retry(func() error { return os.Rename(target, previous) }); err != nil {
 		return fmt.Errorf("move current executable aside: %w", err)
 	}
@@ -33,12 +37,16 @@ func replaceByRename(source, target string, retry func(func() error) error) erro
 	return nil
 }
 
-// CleanupPreviousUpdate removes the executable an earlier update moved
-// aside. Errors are ignored: another running copy may still hold it.
+// CleanupPreviousUpdate removes executables earlier updates moved aside
+// (sshm.exe.old, sshm.exe.old-…). Errors are ignored: a copy that is still
+// running keeps its file until it exits.
 func CleanupPreviousUpdate() {
 	executable, err := os.Executable()
 	if err != nil {
 		return
 	}
-	_ = os.Remove(executable + previousSuffix)
+	leftovers, _ := filepath.Glob(executable + previousSuffix + "*")
+	for _, leftover := range leftovers {
+		_ = os.Remove(leftover)
+	}
 }

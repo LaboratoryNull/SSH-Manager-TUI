@@ -71,7 +71,18 @@ try {
     }
 
     New-Item -ItemType Directory -Force -Path $InstallDirectory | Out-Null
-    Copy-Item -Force $TemporaryBinary (Join-Path $InstallDirectory "sshm.exe")
+    $TargetBinary = Join-Path $InstallDirectory "sshm.exe"
+    # Leftovers of earlier updates; the ones still in use stay until exit.
+    Get-ChildItem -LiteralPath $InstallDirectory -Filter "sshm.exe.old*" -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $TargetBinary) {
+        # A running sshm.exe cannot be overwritten, but it can be renamed:
+        # move it aside so the install works with sshm open in another window.
+        $Previous = "$TargetBinary.old-" + [DateTime]::UtcNow.Ticks
+        Move-Item -LiteralPath $TargetBinary -Destination $Previous -Force
+        Remove-Item -LiteralPath $Previous -Force -ErrorAction SilentlyContinue
+    }
+    Copy-Item -Force $TemporaryBinary $TargetBinary
     @'
 @echo off
 "%~dp0sshm.exe" %*
