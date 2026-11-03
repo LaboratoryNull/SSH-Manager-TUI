@@ -3,79 +3,39 @@
 package update
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"strconv"
 	"syscall"
+	"time"
 )
 
-const windowsUpdateScript = `param(
-    [Parameter(Mandatory=$true)][int]$ProcessId,
-    [Parameter(Mandatory=$true)][string]$Source,
-    [Parameter(Mandatory=$true)][string]$Target
-)
-$ErrorActionPreference = 'Stop'
-try {
-    Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue
-    $replaced = $false
-    for ($attempt = 0; $attempt -lt 30; $attempt++) {
-        try {
-            Move-Item -LiteralPath $Source -Destination $Target -Force
-            $replaced = $true
-            break
-        } catch {
-            Start-Sleep -Milliseconds 200
-        }
-    }
-    if (-not $replaced) { throw 'Unable to replace the application executable' }
-    Start-Process -FilePath $Target
-} finally {
-    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
-}
-`
-
-// Windows keeps a running executable locked. Start a detached helper which
-// waits for this process to exit, replaces the verified binary and relaunches it.
+// Windows keeps a running executable locked against writes and deletion,
+// but it can be renamed. The update therefore moves the running sshm.exe
+// aside to sshm.exe.old and puts the verified binary in its place, right
+// away and in-process. The previous version (v1.1.1 and older) started a
+// hidden PowerShell helper and quit; when antivirus software or a policy
+// blocked that helper the update silently never happened.
 func installExecutable(source, target string) (bool, error) {
-	script, err := os.CreateTemp("", "sshm-update-*.ps1")
-	if err != nil {
-		return false, fmt.Errorf("create Windows update helper: %w", err)
-	}
-	scriptName := script.Name()
-	keepScript := false
-	defer func() {
-		_ = script.Close()
-		if !keepScript {
-			_ = os.Remove(scriptName)
-		}
-	}()
-	if _, err := script.WriteString(windowsUpdateScript); err != nil {
-		return false, fmt.Errorf("write Windows update helper: %w", err)
-	}
-	if err := script.Close(); err != nil {
-		return false, fmt.Errorf("close Windows update helper: %w", err)
-	}
-	powerShell, err := exec.LookPath("powershell.exe")
-	if err != nil {
-		return false, fmt.Errorf("find PowerShell: %w", err)
-	}
-	command := exec.Command(
-		powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-File", scriptName,
-		"-ProcessId", strconv.Itoa(os.Getpid()),
-		"-Source", source,
-		"-Target", target,
+	return false, replaceByRename(source, target, retryWindowsSharing)
+}
+
+// retryWindowsSharing retries a file operation for a few seconds while the
+// file is briefly locked, typically by an antivirus scan of the download.
+func retryWindowsSharing(operation func() error) error {
+	const (
+		errorSharingViolation syscall.Errno = 32
+		errorLockViolation    syscall.Errno = 33
 	)
-	command.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | 0x00000008, // DETACHED_PROCESS
+	var err error
+	for attempt := 0; attempt < 50; attempt++ {
+		if err = operation(); err == nil {
+			return nil
+		}
+		if !errors.Is(err, errorSharingViolation) && !errors.Is(err, errorLockViolation) && !errors.Is(err, os.ErrPermission) {
+			return err
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
-	if err := command.Start(); err != nil {
-		return false, fmt.Errorf("start Windows update helper: %w", err)
-	}
-	if command.Process != nil {
-		_ = command.Process.Release()
-	}
-	keepScript = true
-	return true, nil
+	return fmt.Errorf("%w (файл занят: закройте другие окна sshm и проверьте антивирус)", err)
 }

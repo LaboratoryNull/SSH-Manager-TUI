@@ -160,3 +160,36 @@ func manifestServer(t *testing.T, version string, binary []byte, corruptHash boo
 	}))
 	return server
 }
+
+func TestReplaceByRenameSwapsAndRollsBack(t *testing.T) {
+	direct := func(operation func() error) error { return operation() }
+	directory := t.TempDir()
+	target := filepath.Join(directory, "sshm.exe")
+	source := filepath.Join(directory, ".sshm-update-1")
+	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target+previousSuffix, []byte("stale"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceByRename(source, target, direct); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "new" {
+		t.Fatalf("target = %q", got)
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatal("downloaded file was not moved into place")
+	}
+
+	// A missing download must leave the current executable in place.
+	if err := replaceByRename(filepath.Join(directory, "missing"), target, direct); err == nil {
+		t.Fatal("expected an error for a missing download")
+	}
+	if got, _ := os.ReadFile(target); string(got) != "new" {
+		t.Fatalf("target after rollback = %q", got)
+	}
+}
