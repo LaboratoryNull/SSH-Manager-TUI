@@ -629,14 +629,14 @@ func TestSessionHintDescriptionIsClickable(t *testing.T) {
 	foundX, foundY := -1, -1
 	for y := 1; y < m.height && foundX < 0; y++ {
 		for x := 0; x < m.width; x++ {
-			if m.clickedHint(x, y) == "n" {
+			if m.clickedHint(x, y) == "Ctrl+N" {
 				foundX, foundY = x, y
 				break
 			}
 		}
 	}
 	if foundX < 0 {
-		t.Fatal("new-session hint has no mouse hit target")
+		t.Fatal("new-server hint has no mouse hit target")
 	}
 	_, _ = m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: foundX, Y: foundY, Button: tea.MouseLeft}))
 	if m.page != pageForm {
@@ -657,7 +657,7 @@ func TestConnectionCountIsNotRenderedInSessionList(t *testing.T) {
 	}
 }
 
-func TestEditSessionHintIsClickable(t *testing.T) {
+func TestCommandPaletteEditsSelectedServer(t *testing.T) {
 	m := &Model{
 		width: 100, height: 30, page: pageSessions,
 		config: config.Config{Sessions: []config.Session{{
@@ -665,21 +665,16 @@ func TestEditSessionHintIsClickable(t *testing.T) {
 		}}},
 	}
 	m.resetForm()
-	foundX, foundY := -1, -1
-	for y := 1; y < m.height && foundX < 0; y++ {
-		for x := 0; x < m.width; x++ {
-			if m.clickedHint(x, y) == "e" {
-				foundX, foundY = x, y
-				break
-			}
-		}
+	m.handleSessionKey(tea.KeyPressMsg(tea.Key{Code: 'k', Mod: tea.ModCtrl}))
+	if m.palette == nil {
+		t.Fatal("Ctrl+K did not open the command palette")
 	}
-	if foundX < 0 {
-		t.Fatal("edit-session hint has no mouse hit target")
+	for _, r := range "изм" {
+		m.handleKey(tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)}))
 	}
-	_, _ = m.handleMouseClick(tea.MouseClickMsg(tea.Mouse{X: foundX, Y: foundY, Button: tea.MouseLeft}))
-	if m.page != pageForm || m.formSessionName != "prod" {
-		t.Fatalf("clicked edit hint: page=%v original=%q", m.page, m.formSessionName)
+	m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	if m.palette != nil || m.page != pageForm || m.formSessionName != "prod" {
+		t.Fatalf("palette edit: palette=%v page=%v original=%q", m.palette != nil, m.page, m.formSessionName)
 	}
 }
 
@@ -700,7 +695,7 @@ func TestExistingHostCanBeEditedWithoutConnecting(t *testing.T) {
 	}
 	m.resetForm()
 
-	_, cmd := m.handleSessionKey(tea.KeyPressMsg(tea.Key{Code: 'e', Text: "e"}))
+	_, cmd := m.handleSessionKey(tea.KeyPressMsg(tea.Key{Code: 'e', Mod: tea.ModCtrl}))
 	if cmd != nil || m.page != pageForm || m.formSessionIndex != 1 {
 		t.Fatalf("edit form state: cmd=%v page=%v index=%d", cmd != nil, m.page, m.formSessionIndex)
 	}
@@ -739,14 +734,20 @@ func TestExistingHostCanBeEditedWithoutConnecting(t *testing.T) {
 	}
 }
 
-func TestQOnHostPickerClosesOnlyCurrentTab(t *testing.T) {
+func TestLettersOnHostScreenGoToSearch(t *testing.T) {
 	m := &Model{width: 80, height: 24, tabID: 1, nextTabID: 1, page: pageSessions, sftpHidden: true}
 	m.resetForm()
 	m.tabs = []*tabState{m.captureTab()}
 	m.openTab()
-	_, cmd := m.handleSessionKey(tea.KeyPressMsg(tea.Key{Code: 'q', Text: "q"}))
-	if cmd != nil || len(m.tabs) != 1 || m.activeTab != 0 || m.tabID != 1 {
-		t.Fatalf("q result: cmd=%v tabs=%d active=%d id=%d", cmd != nil, len(m.tabs), m.activeTab, m.tabID)
+	// "q", "d" or "p" used to quit, delete or open profiles; now they start a
+	// search such as "prod" and never run a command by accident.
+	for _, r := range "qdp" {
+		if _, cmd := m.handleSessionKey(tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)})); cmd != nil && len(m.tabs) != 2 {
+			t.Fatal("letter key ran a command")
+		}
+	}
+	if len(m.tabs) != 2 || m.confirm || m.profileManager != nil || m.launcherQuery() != "qdp" {
+		t.Fatalf("tabs=%d confirm=%v profiles=%v query=%q", len(m.tabs), m.confirm, m.profileManager != nil, m.launcherQuery())
 	}
 }
 

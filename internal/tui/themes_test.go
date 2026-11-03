@@ -57,7 +57,11 @@ func TestThemeCyclesAndPersistsFromHostScreen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, cmd := m.handleSessionKey(tea.KeyPressMsg(tea.Key{Code: 't', Text: "t"}))
+	m.openCommandPalette()
+	for _, r := range "тем" {
+		m.handleKey(tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)}))
+	}
+	_, cmd := m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 	if cmd != nil || m.config.Theme != themeAbyss || !strings.Contains(m.status, "Deep Ocean") {
 		t.Fatalf("cycled theme: id=%q status=%q cmd nil=%v", m.config.Theme, m.status, cmd == nil)
 	}
@@ -68,18 +72,26 @@ func TestThemeCyclesAndPersistsFromHostScreen(t *testing.T) {
 	if loaded.Theme != themeAbyss {
 		t.Fatalf("saved theme = %q", loaded.Theme)
 	}
-	_, _ = m.activateHint("t")
+	cycleThemeFromPalette(m)
 	if m.config.Theme != themeSource || !strings.Contains(m.status, "Steam Source") {
 		t.Fatalf("clickable theme hint did not cycle: id=%q status=%q", m.config.Theme, m.status)
 	}
-	_, _ = m.activateHint("t")
+	cycleThemeFromPalette(m)
 	if m.config.Theme != themeWin98 || !strings.Contains(m.status, "Windows 98 Dark") {
 		t.Fatalf("Windows theme did not cycle: id=%q status=%q", m.config.Theme, m.status)
 	}
-	_, _ = m.activateHint("t")
+	cycleThemeFromPalette(m)
 	if m.config.Theme != themeMidnight || !strings.Contains(m.status, "Midnight") {
 		t.Fatalf("theme cycle did not wrap: id=%q status=%q", m.config.Theme, m.status)
 	}
+}
+
+func cycleThemeFromPalette(m *Model) {
+	m.openCommandPalette()
+	for _, r := range "тем" {
+		m.handleKey(tea.KeyPressMsg(tea.Key{Code: r, Text: string(r)}))
+	}
+	m.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
 }
 
 func TestWindows98ThemeUsesSegmentedProgressBar(t *testing.T) {
@@ -114,25 +126,20 @@ func TestUnknownStoredThemeFallsBackToMidnight(t *testing.T) {
 	}
 }
 
-func TestThemeHintIsOnlyShownAtTopRightOfHostSelection(t *testing.T) {
+func TestTabBarAndHostScreenStayFreeOfKeyHints(t *testing.T) {
 	m := &Model{
-		width: 120, height: 30, page: pageSessions, tabID: 1,
+		width: 120, height: 30, page: pageSessions, tabID: 1, appVersion: "v1.2.0",
 		config: config.Config{Theme: themeMidnight},
 	}
 	m.resetForm()
 	m.tabs = []*tabState{m.captureTab()}
 
-	topLine := ansi.Strip(m.tabsView())
-	if !strings.HasSuffix(strings.TrimSpace(topLine), "тема: Midnight") {
-		t.Fatalf("theme hint is not at top right: %q", topLine)
+	topLine := strings.TrimSpace(ansi.Strip(m.tabsView()))
+	if !strings.HasSuffix(topLine, "sshm v1.2.0") || strings.Contains(topLine, "тема:") || strings.Contains(topLine, "^T") {
+		t.Fatalf("tab bar should only show tabs and the version: %q", topLine)
 	}
 	if strings.Contains(ansi.Strip(m.sessionsView()), "тема:") {
-		t.Fatal("theme hint is still rendered inside the host selection card")
-	}
-
-	m.page = pageForm
-	if strings.Contains(ansi.Strip(m.tabsView()), "тема:") {
-		t.Fatal("theme hint is visible outside the host selection page")
+		t.Fatal("theme hint is rendered inside the host screen")
 	}
 }
 

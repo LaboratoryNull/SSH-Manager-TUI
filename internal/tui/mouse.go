@@ -10,6 +10,7 @@ import (
 )
 
 var clickableHintLabels = []string{
+	"Ctrl+K", "Ctrl+N", "F1",
 	"Shift+Insert/ПКМ", "⇧Ins/ПКМ", "Shift+Insert", "⇧Ins",
 	"Ctrl+Shift+Space", "Ctrl+Shift+1…9", "Ctrl+Shift+←/→", "Ctrl+Shift+P", "Ctrl+Shift+C",
 	"^⇧Space", "^⇧1…9", "^⇧←/→", "^⇧P",
@@ -61,6 +62,45 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	if label := m.clickedHint(mouse.X, mouse.Y); label != "" {
 		return m.activateHint(label)
 	}
+	if m.launcherVisible() {
+		return m.handleLauncherClick(mouse.Y)
+	}
+	return m, nil
+}
+
+func (m *Model) launcherVisible() bool {
+	return m.page == pageSessions && m.palette == nil && m.updateDialog == nil && m.hostKeyPrompt == nil &&
+		m.passwordPrompt == nil && m.groupInput == nil && m.profileManager == nil && m.importWizard == nil
+}
+
+// handleLauncherClick selects a server with the first click and connects on
+// a click on the already highlighted one. The list starts right below the
+// thin rule under the search field.
+func (m *Model) handleLauncherClick(y int) (tea.Model, tea.Cmd) {
+	if m.connecting || m.confirm {
+		return m, nil
+	}
+	lines := strings.Split(ansi.Strip(m.viewContent()), "\n")
+	rule := -1
+	for index, line := range lines {
+		if strings.Contains(line, strings.Repeat("─", 20)) && strings.Count(line, "│") == 2 {
+			rule = index
+			break
+		}
+	}
+	if rule < 0 {
+		return m, nil
+	}
+	row := m.launcherRowAt(y - rule - 1)
+	if row < 0 {
+		return m, nil
+	}
+	launcher := m.ensureLauncher()
+	if launcher.cursor == row {
+		return m, m.connectLaunchRow()
+	}
+	launcher.cursor = row
+	m.syncSelection()
 	return m, nil
 }
 
@@ -276,6 +316,14 @@ func (m *Model) activateHint(label string) (tea.Model, tea.Cmd) {
 	}
 	if !platformHint {
 		switch label {
+		case "Ctrl+K", "F1":
+			m.openCommandPalette()
+			return m, nil
+		case "Ctrl+N":
+			if m.page == pageSessions {
+				m.openNewSessionForm()
+			}
+			return m, nil
 		case "Shift+Insert/ПКМ", "⇧Ins/ПКМ", "Shift+Insert", "⇧Ins":
 			press = key(tea.KeyInsert, tea.ModShift, "")
 		case "Esc q":
