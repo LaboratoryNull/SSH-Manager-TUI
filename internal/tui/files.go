@@ -509,8 +509,13 @@ func copyRemote(ctx context.Context, client *sftp.Client, remotePath, localPath 
 	return nil
 }
 
+const transferBufferSize = 1 << 20
+
 func copyWithProgress(ctx context.Context, dst io.Writer, src io.Reader, done *int64, total int64, name string, uploading bool, updates chan<- transferProgressMsg) error {
-	buf := make([]byte, 128*1024)
+	// A large buffer lets pkg/sftp split each call into many parallel
+	// requests (concurrent reads/writes); with small buffers every 32 KiB
+	// packet waited a full round trip, capping uploads at ~32 KiB per RTT.
+	buf := make([]byte, transferBufferSize)
 	last := time.Now().Add(-time.Second)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -641,7 +646,9 @@ func copyRemoteTree(client *sftp.Client, source, target string) error {
 		_ = sourceFile.Close()
 		return err
 	}
-	_, copyErr := io.Copy(targetFile, sourceFile)
+	// Hide ReaderFrom/WriterTo so the copy goes through large buffered calls,
+	// which pkg/sftp parallelises in both directions.
+	_, copyErr := io.CopyBuffer(struct{ io.Writer }{targetFile}, struct{ io.Reader }{sourceFile}, make([]byte, transferBufferSize))
 	targetCloseErr := targetFile.Close()
 	sourceCloseErr := sourceFile.Close()
 	if copyErr != nil {

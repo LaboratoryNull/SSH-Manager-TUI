@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -178,6 +179,7 @@ func connect(ctx context.Context, profile config.Session, width, height int, key
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", address, err)
 	}
+	clientConfig.HostKeyAlgorithms = preferredHostKeyAlgorithms(hostKeys, address, netConn.RemoteAddr())
 	stopContextClose := context.AfterFunc(ctx, func() { _ = netConn.Close() })
 	defer stopContextClose()
 	handshakeDeadline := time.Now().Add(12 * time.Second)
@@ -204,7 +206,10 @@ func connect(ctx context.Context, profile config.Session, width, height int, key
 		return nil, err
 	}
 
-	sftpClient, err := sftp.NewClient(sshClient)
+	sftpClient, err := sftp.NewClient(sshClient,
+		sftp.UseConcurrentWrites(true),
+		sftp.UseConcurrentReads(true),
+	)
 	if err != nil {
 		return fail(fmt.Errorf("start SFTP: %w", err))
 	}
@@ -283,8 +288,18 @@ func TestKey(ctx context.Context, profile config.Session) error {
 		return err
 	}
 	defer netConn.Close()
+	stopContextClose := context.AfterFunc(ctx, func() { _ = netConn.Close() })
+	defer stopContextClose()
+	// ClientConfig.Timeout only covers dialing, which is done above; bound
+	// the handshake itself so a silent server cannot hang the key test.
+	deadline := time.Now().Add(12 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = netConn.SetDeadline(deadline)
 	sshConn, _, _, err := ssh.NewClientConn(netConn, address, &ssh.ClientConfig{
 		User: profile.User, Auth: auth, HostKeyCallback: hostKeys, Timeout: 12 * time.Second,
+		HostKeyAlgorithms: preferredHostKeyAlgorithms(hostKeys, address, netConn.RemoteAddr()),
 	})
 	if err != nil {
 		return fmt.Errorf("SSH key authentication: %w", err)
@@ -324,7 +339,13 @@ func (c *Connection) monitorOutput(out chan<- []byte, readers ...io.Reader) {
 				n, err := r.Read(buf)
 				if n > 0 {
 					chunk := append([]byte(nil), buf[:n]...)
-					out <- chunk
+					select {
+					case out <- chunk:
+					case <-c.done:
+						// Nobody reads Output after Close; dropping the chunk
+						// lets this goroutine exit instead of leaking.
+						return
+					}
 				}
 				if err != nil {
 					if !errors.Is(err, io.EOF) {
@@ -365,14 +386,29 @@ func (c *Connection) keepalive() {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			if err := c.netConn.SetDeadline(time.Now().Add(keepaliveTimeout)); err != nil {
-				c.fail(fmt.Errorf("set SSH keepalive deadline: %w", err))
+			// The reply is awaited with a timer instead of a socket deadline:
+			// a deadline on the shared connection also aborted unrelated
+			// writes (e.g. an SFTP upload stalled by TCP backpressure on a
+			// slow link) and killed otherwise healthy sessions.
+			reply := make(chan error, 1)
+			go func() {
+				_, _, err := c.SSH.SendRequest("keepalive@openssh.com", true, nil)
+				reply <- err
+			}()
+			timer := time.NewTimer(keepaliveTimeout)
+			select {
+			case err := <-reply:
+				timer.Stop()
+				if err != nil {
+					c.fail(fmt.Errorf("SSH keepalive: %w", err))
+					return
+				}
+			case <-timer.C:
+				// fail closes the socket, which also unblocks SendRequest.
+				c.fail(errors.New("SSH keepalive: no reply from server"))
 				return
-			}
-			_, _, err := c.SSH.SendRequest("keepalive@openssh.com", true, nil)
-			_ = c.netConn.SetDeadline(time.Time{})
-			if err != nil {
-				c.fail(fmt.Errorf("SSH keepalive: %w", err))
+			case <-c.done:
+				timer.Stop()
 				return
 			}
 		}
@@ -510,6 +546,46 @@ func hostKeyCallback() (ssh.HostKeyCallback, error) {
 	}, nil
 }
 
+// probeHostKey never matches a stored key; checking it reveals which key
+// types known_hosts already holds for a host.
+type probeHostKey struct{}
+
+func (probeHostKey) Type() string                        { return "sshm-probe" }
+func (probeHostKey) Marshal() []byte                     { return []byte("sshm-probe") }
+func (probeHostKey) Verify([]byte, *ssh.Signature) error { return errors.New("probe key") }
+
+// preferredHostKeyAlgorithms puts the algorithms of already known host keys
+// first, like OpenSSH does. Without it the server may present a key type that
+// is not stored (say ecdsa when known_hosts has ed25519), which the user saw
+// as a scary "host key changed" warning. Unknown hosts keep the defaults.
+func preferredHostKeyAlgorithms(check ssh.HostKeyCallback, address string, remoteAddr net.Addr) []string {
+	var known *HostKeyMismatchError
+	if !errors.As(check(address, remoteAddr, probeHostKey{}), &known) || len(known.Expected) == 0 {
+		return nil
+	}
+	supported := ssh.SupportedAlgorithms().HostKeys
+	var preferred []string
+	add := func(algorithm string) {
+		if slices.Contains(supported, algorithm) && !slices.Contains(preferred, algorithm) {
+			preferred = append(preferred, algorithm)
+		}
+	}
+	for _, key := range known.Expected {
+		if key.Algorithm == ssh.KeyAlgoRSA {
+			add(ssh.KeyAlgoRSASHA512)
+			add(ssh.KeyAlgoRSASHA256)
+		}
+		add(key.Algorithm)
+	}
+	if len(preferred) == 0 {
+		return nil
+	}
+	for _, algorithm := range supported {
+		add(algorithm)
+	}
+	return preferred
+}
+
 func appendKnownHost(managerFile, hostname string, key ssh.PublicKey) error {
 	knownHostsMu.Lock()
 	defer knownHostsMu.Unlock()
@@ -544,7 +620,7 @@ func expandHome(path string) string {
 	if path == "~" || strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
 		if err == nil {
-			return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+			return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(path, "~"), "/"))
 		}
 	}
 	return path
