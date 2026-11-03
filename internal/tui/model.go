@@ -1532,7 +1532,7 @@ func (m *Model) filesView(width, height int) string {
 				icon = "… "
 			}
 		}
-		line := truncate(prefix+icon+node.Name, width)
+		line := fileRow(prefix+icon+node.Name, node, width)
 		style := lipgloss.NewStyle().Width(width).Foreground(textColor)
 		if node.Dir {
 			style = style.Foreground(accentAlt)
@@ -1574,6 +1574,50 @@ func (m *Model) filesView(width, height int) string {
 	}
 	lines = append(lines, help)
 	return strings.Join(lines, "\n")
+}
+
+// minFileNameWidth is how much of the name stays visible before the size
+// column is dropped on very narrow panels.
+const minFileNameWidth = 8
+
+// fileRow renders a tree entry with the file size right-aligned, e.g.
+// "· video.mp4    1.4 GB". Directories have no size. When the panel is too
+// narrow to keep a readable name, only the name is shown.
+func fileRow(label string, node *fileNode, width int) string {
+	if node.Dir {
+		return truncate(label, width)
+	}
+	size := compactSize(node.Size)
+	nameWidth := width - lipgloss.Width(size) - 1
+	if nameWidth < minFileNameWidth {
+		return truncate(label, width)
+	}
+	name := truncate(label, nameWidth)
+	gap := width - lipgloss.Width(name) - lipgloss.Width(size)
+	return name + strings.Repeat(" ", gap) + size
+}
+
+// compactSize formats a size for the narrow SFTP column: at most 6 cells,
+// one decimal below 10 ("1.4 GB"), whole numbers above ("850 MB").
+func compactSize(size int64) string {
+	units := [...]string{"B", "KB", "MB", "GB", "TB", "PB"}
+	if size < 1024 {
+		return fmt.Sprintf("%d B", max(size, 0))
+	}
+	value, unit := float64(size), 0
+	for value >= 1024 && unit < len(units)-1 {
+		value /= 1024
+		unit++
+	}
+	// Values that would round up to 1024 move to the next unit so the
+	// column never grows to "1024 KB".
+	if value >= 1023.5 && unit < len(units)-1 {
+		value, unit = 1, unit+1
+	}
+	if value < 9.95 {
+		return fmt.Sprintf("%.1f %s", value, units[unit])
+	}
+	return fmt.Sprintf("%.0f %s", value, units[unit])
 }
 
 func (m *Model) progressView(width int) string {
