@@ -135,6 +135,8 @@ type tabState struct {
 	hostKeyPrompt        *hostKeyPrompt
 	passwordPrompt       *passwordPrompt
 	reconnect            *reconnectState
+	launcher             *launcherState
+	pendingSave          *config.Session
 }
 
 type Model struct {
@@ -211,6 +213,15 @@ type Model struct {
 	hostKeyPrompt        *hostKeyPrompt
 	passwordPrompt       *passwordPrompt
 	reconnect            *reconnectState
+
+	// launcher is the per-tab search state of the host screen; pendingSave is
+	// a host typed or picked from shell history that is saved once the
+	// connection succeeds.
+	launcher    *launcherState
+	pendingSave *config.Session
+	// historyHosts and palette are shared by all tabs.
+	historyHosts []historyHost
+	palette      *commandPalette
 }
 
 var (
@@ -263,10 +274,11 @@ func New(store *config.Store, application ...AppInfo) (*Model, error) {
 }
 
 func (m *Model) Init() tea.Cmd {
+	commands := []tea.Cmd{textinput.Blink, loadHistoryHosts}
 	if command := m.checkForUpdate(); command != nil {
-		return tea.Batch(textinput.Blink, command)
+		commands = append(commands, command)
 	}
-	return textinput.Blink
+	return tea.Batch(commands...)
 }
 
 func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -293,6 +305,9 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	switch msg := message.(type) {
+	case historyHostsMsg:
+		m.historyHosts = msg.hosts
+		return m, nil
 	case updateCheckMsg:
 		return m.handleUpdateCheck(msg)
 	case updateInstallMsg:
@@ -321,10 +336,17 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.passwordPrompt.status = "Ошибка подключения: " + msg.err.Error()
 				return m, nil
 			}
-			m.status = "Ошибка подключения: " + msg.err.Error()
+			m.status = "Ошибка подключения: " + friendlyConnectError(msg.err, msg.profile)
 			return m, nil
 		}
 		passwordChanged := m.passwordPrompt != nil
+		profile, savedNewHost, savedHostErr := m.savePendingHost(msg.profile)
+		msg.profile = profile
+		if m.launcher != nil {
+			// Back on the host screen the search starts fresh, like Spotlight.
+			m.launcher.query.SetValue("")
+			m.launcher.cursor, m.launcher.offset = 0, 0
+		}
 		m.profile, m.conn, m.page = msg.profile, msg.conn, pageConnected
 		m.filesFocused, m.sftpHidden = false, true
 		m.forwardModal = nil
@@ -337,12 +359,16 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.resizeRemote()
 		m.term.SetCurrentDirectory(msg.conn.Home)
-		if passwordSaveErr != nil {
+		if savedHostErr != nil {
+			m.status = "Подключено, но сервер не сохранён: " + savedHostErr.Error()
+		} else if passwordSaveErr != nil {
 			m.status = "Подключено, но новый пароль не сохранён: " + passwordSaveErr.Error()
 		} else if err := m.recordConnection(msg.profile); err != nil {
 			m.status = "Подключено, но статистика не сохранена: " + err.Error()
 		} else if passwordChanged {
 			m.status = "Подключено, новый пароль сохранён"
+		} else if savedNewHost {
+			m.status = "Подключено · сервер добавлен в список"
 		}
 		m.root = &fileNode{Name: msg.conn.Home, Path: msg.conn.Home, Dir: true, Expanded: true, Loading: true}
 		m.visible = []*fileNode{m.root}
@@ -535,8 +561,11 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.sftpDialog.status = ""
 			return m, cmd
 		}
-		if m.page == pageConnected {
+		if m.page == pageConnected && m.palette == nil {
 			return m.handleConnectedPaste(msg.Content)
+		}
+		if m.page == pageSessions && m.palette == nil && m.hostKeyPrompt == nil && m.groupInput == nil && m.profileManager == nil && m.importWizard == nil {
+			return m.handleLauncherPaste(msg.Content)
 		}
 	case tea.MouseClickMsg:
 		if m.updateDialog != nil {
@@ -577,6 +606,16 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.inputs[m.formFocus], cmd = m.inputs[m.formFocus].Update(message)
 		return m, cmd
 	}
+	if m.palette != nil {
+		var cmd tea.Cmd
+		m.palette.input, cmd = m.palette.input.Update(message)
+		return m, cmd
+	}
+	if m.page == pageSessions && m.launcher != nil {
+		var cmd tea.Cmd
+		m.launcher.query, cmd = m.launcher.query.Update(message)
+		return m, cmd
+	}
 	return m, nil
 }
 
@@ -590,6 +629,9 @@ func (m *Model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.passwordPrompt != nil {
 		return m.handlePasswordPrompt(key)
+	}
+	if m.palette != nil {
+		return m.handlePaletteKey(key)
 	}
 	if m.reconnect != nil {
 		return m.handleReconnectKey(key)
@@ -624,15 +666,7 @@ func (m *Model) handleTabKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 	if matchesPlatformShortcut(key, 'b', false) {
-		if m.page == pageConnected {
-			m.sftpHidden = !m.sftpHidden
-			if m.sftpHidden {
-				m.filesFocused = false
-			} else {
-				m.filesFocused = true
-			}
-			m.resizeRemote()
-		}
+		m.toggleSFTP()
 		return m, nil, true
 	}
 	if matchesPlatformNavigationShortcut(key, tea.KeyLeft) {
@@ -664,89 +698,13 @@ func (m *Model) handleTabKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-func (m *Model) handleSessionKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if len(m.config.Sessions) == 0 {
-		m.selected = 0
-		m.confirm = false
-	} else if m.selected < 0 || m.selected >= len(m.config.Sessions) {
-		m.selected = m.sessionOrder()[0]
-		m.confirm = false
+func (m *Model) toggleSFTP() {
+	if m.page != pageConnected {
+		return
 	}
-	if m.connecting {
-		if key.String() == "esc" {
-			m.status = "Ожидание сетевого подключения нельзя прервать мгновенно"
-		}
-		return m, nil
-	}
-	if m.confirm {
-		switch key.String() {
-		case "y", "Y", "д", "Д":
-			m.config.Sessions = append(m.config.Sessions[:m.selected], m.config.Sessions[m.selected+1:]...)
-			if order := m.sessionOrder(); len(order) > 0 {
-				m.selected = order[min(m.selected, len(order)-1)]
-			} else {
-				m.selected = 0
-			}
-			m.confirm = false
-			if err := m.store.Save(m.config); err != nil {
-				m.status = "Не удалось сохранить: " + err.Error()
-			} else {
-				m.status = "Хост удалён"
-			}
-		case "n", "N", "н", "Н", "esc":
-			m.confirm = false
-			m.status = "Удаление отменено"
-		}
-		return m, nil
-	}
-	switch key.String() {
-	case "ctrl+c":
-		m.close()
-		return m, tea.Quit
-	case "q":
-		if len(m.tabs) > 1 {
-			m.closeActiveTab()
-			return m, nil
-		}
-		m.close()
-		return m, tea.Quit
-	case "up", "k":
-		m.moveSessionSelection(-1)
-	case "down", "j":
-		m.moveSessionSelection(1)
-	case "n":
-		m.resetForm()
-		m.page, m.status = pageForm, ""
-	case "e":
-		m.beginSessionEdit()
-	case "p":
-		m.profileManager = &profileManager{}
-	case "i":
-		return m, m.openHistoryImport()
-	case "d":
-		if len(m.config.Sessions) > 0 {
-			m.confirm = true
-			m.status = "Удалить хост? y/n"
-		}
-	case "g":
-		m.beginGroupEdit()
-	case "t", "е":
-		m.cycleTheme()
-	case "enter":
-		if len(m.config.Sessions) > 0 {
-			profile := m.config.Sessions[m.selected]
-			resolved, err := m.config.ResolveSession(profile)
-			if err != nil {
-				m.status = "Ошибка профиля: " + err.Error()
-				return m, nil
-			}
-			m.connecting = true
-			m.status = "Подключение к " + profile.Host + "…"
-			width, height := m.consoleSize()
-			return m, connectCommand(m.tabID, resolved, width, height)
-		}
-	}
-	return m, nil
+	m.sftpHidden = !m.sftpHidden
+	m.filesFocused = !m.sftpHidden
+	m.resizeRemote()
 }
 
 func (m *Model) handleFormKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -895,10 +853,19 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if s == "shift+insert" && !m.filesFocused {
 		return m, m.requestClipboardPaste()
 	}
+	if s == "f1" {
+		m.openCommandPalette()
+		return m, nil
+	}
 	if m.escapePending {
 		m.escapePending = false
 		if s == "q" {
 			m.disconnect("Отключено")
+			return m, nil
+		}
+		if s == "k" || s == "л" {
+			m.status = "Подключено"
+			m.openCommandPalette()
 			return m, nil
 		}
 		if !m.filesFocused && m.conn != nil {
@@ -910,7 +877,7 @@ func (m *Model) handleConnectedKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if s == "esc" {
 		m.escapePending = true
 		m.escapeID++
-		m.status = "Для выхода нажмите q после Esc"
+		m.status = "q — отключиться, k — команды"
 		return m, escapeTimeoutCommand(m.tabID, m.escapeID)
 	}
 	if matchesPlatformFocusShortcut(key) || (runtime.GOOS != "darwin" && runtime.GOOS != "windows" && s == "ctrl+@") {
@@ -1208,6 +1175,9 @@ func (m *Model) viewContent() string {
 	if m.passwordPrompt != nil {
 		return m.tabsView() + "\n" + m.passwordPromptView()
 	}
+	if m.palette != nil {
+		return m.tabsView() + "\n" + m.paletteView()
+	}
 	if m.groupInput != nil {
 		return m.tabsView() + "\n" + m.groupPromptView()
 	}
@@ -1239,9 +1209,14 @@ func (m *Model) viewContent() string {
 }
 
 func (m *Model) tabsView() string {
+	help := m.tabBarHelp()
+	if len(m.tabs) <= 1 {
+		// A single tab needs no tab strip, as in Safari or Terminal.
+		return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).
+			Render(strings.Repeat(" ", max(0, m.width-lipgloss.Width(help))) + help)
+	}
 	parts := make([]string, 0, len(m.tabs)+1)
 	used := 0
-	help := m.tabBarHelp()
 	for index := range m.tabs {
 		label := fmt.Sprintf(" %d %s ", index+1, m.tabTitle(index))
 		style := lipgloss.NewStyle().Foreground(muted).Background(surface)
@@ -1265,15 +1240,10 @@ func (m *Model) tabsView() string {
 }
 
 func (m *Model) tabBarHelp() string {
-	keys := compactPlatformKeys()
-	help := renderHints([2]string{keys.newTab, "+"}, [2]string{keys.closeTab, "×"}, [2]string{keys.tabs, "вкладки"})
-	if m.themeHintVisible() {
-		help += "  " + renderHints([2]string{"t", "тема: " + currentThemeName(m.config.Theme)})
+	if m.appVersion == "" {
+		return ""
 	}
-	if m.appVersion != "" {
-		help = lipgloss.NewStyle().Foreground(muted).Render("sshm "+m.appVersion) + "  " + help
-	}
-	return help
+	return lipgloss.NewStyle().Foreground(borderMuted).Render("sshm " + m.appVersion + " ")
 }
 
 func (m *Model) themeHintVisible() bool {
@@ -1313,7 +1283,7 @@ func (m *Model) tabTitle(index int) string {
 		}
 		return "Новая сессия"
 	}
-	return "Выбор хоста"
+	return "Серверы"
 }
 
 func (m *Model) contentHeight() int {
@@ -1333,68 +1303,19 @@ func (m *Model) connectedHints(width int) string {
 	compact := compactPlatformKeys()
 	if m.transferring {
 		return hintsView(width,
-			[][2]string{{keys.cancel, "отменить передачу"}, {keys.toggleSFTP, "SFTP"}, {"Esc q", "отключить"}},
-			[][2]string{{compact.cancel, "отмена"}, {compact.toggleSFTP, "SFTP"}},
-			[][2]string{{compact.cancel, "отмена"}},
+			[][2]string{{keys.cancel, "Отменить передачу"}, {"F1", "Команды"}},
+			[][2]string{{compact.cancel, "Отмена"}},
 		)
 	}
+	files := "Файлы"
+	if !m.sftpHidden {
+		files = "Скрыть файлы"
+	}
 	return hintsView(width,
-		[][2]string{
-			{keys.newTab, "новая вкладка"}, {keys.closeTab, "закрыть"}, {keys.tabs, "вкладки"},
-			{keys.numberedTabs, "по номеру"}, {keys.toggleSFTP, "SFTP"}, {"Shift+Insert/ПКМ", "вставить"}, {keys.ports, "порты"}, {"Esc q", "отключить"},
-		},
-		[][2]string{
-			{"⇧Ins/ПКМ", "вставка"}, {compact.toggleSFTP, "SFTP"},
-			{compact.ports, "порты"}, {"Esc q", "выход"},
-		},
-		[][2]string{{"⇧Ins/ПКМ", "вставка"}, {compact.toggleSFTP, "SFTP"}, {"Esc q", "выход"}},
-		[][2]string{{"⇧Ins/ПКМ", "вставка"}, {compact.toggleSFTP, "SFTP"}},
-		[][2]string{{"⇧Ins", "вставка"}},
+		[][2]string{{"F1", "Команды"}, {keys.toggleSFTP, files}, {"Esc q", "Отключиться"}},
+		[][2]string{{"F1", "Команды"}, {"Esc q", "Отключиться"}},
+		[][2]string{{"F1", "Команды"}},
 	)
-}
-
-func (m *Model) sessionsView() string {
-	title := titleStyle.Render("◆ SSH") + subtitleStyle.Copy().Bold(true).Render(" MANAGER")
-	lines := []string{title, lipgloss.NewStyle().Foreground(muted).Render("Сохранённые подключения"), ""}
-	if len(m.config.Sessions) == 0 {
-		lines = append(lines, lipgloss.NewStyle().Foreground(muted).Italic(true).Render("Сохранённых сессий пока нет."))
-	} else {
-		previousGroup := "\x00"
-		for _, i := range m.sessionOrder() {
-			profile := m.config.Sessions[i]
-			group := strings.TrimSpace(profile.Group)
-			if group != previousGroup {
-				if previousGroup != "\x00" {
-					lines = append(lines, "")
-				}
-				groupLabel := group
-				if groupLabel == "" {
-					groupLabel = "Без группы"
-				}
-				lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(accentWarm).Render("▰ "+groupLabel))
-				previousGroup = group
-			}
-			cursor := "  "
-			style := lipgloss.NewStyle().Foreground(textColor)
-			if i == m.selected {
-				cursor = "▸ "
-				style = selectedStyle.Copy().Padding(0, 1)
-			}
-			line := fmt.Sprintf("%s%s  %s", cursor, profile.Name, subtitleStyle.Render(fmt.Sprintf("%s@%s:%d", m.sessionUser(profile), profile.Host, profile.Port)))
-			lines = append(lines, style.Render(line))
-		}
-	}
-	lines = append(lines, "", renderHints(
-		[2]string{"↑/↓", "выбор"}, [2]string{"Enter", "подключиться"},
-		[2]string{"n", "новая"}, [2]string{"e", "изменить"}, [2]string{"p", "профили"}, [2]string{"i", "импорт"},
-		[2]string{"g", "переместить"}, [2]string{"d", "удалить"}, [2]string{"q", "закрыть"},
-	))
-	if m.status != "" {
-		lines = append(lines, "", statusLine(m.status))
-	}
-	boxWidth := min(max(74, lipgloss.Width(strings.Join(lines, "\n"))+6), max(20, m.width-4))
-	box := borderStyle.Copy().Padding(1, 2).Width(boxWidth).Render(strings.Join(lines, "\n"))
-	return m.placeCentered(box)
 }
 
 func (m *Model) groupPromptView() string {
@@ -1488,15 +1409,27 @@ func (m *Model) connectedView() string {
 	} else {
 		consoleBorder = accent
 	}
-	consoleTitle := fmt.Sprintf(" ● SSH  %s@%s • Esc q: назад ", m.profile.User, m.profile.Host)
+	// Calm header: who you are connected to; details and state are muted.
+	name := m.profile.Name
+	if name == "" {
+		name = m.profile.Host
+	}
+	address := m.profile.User + "@" + hostWithPort(m.profile)
+	var extras []string
 	if m.term != nil && m.term.ScrollOffset() > 0 {
-		consoleTitle += fmt.Sprintf(" • история: −%d ", m.term.ScrollOffset())
+		extras = append(extras, fmt.Sprintf("история −%d", m.term.ScrollOffset()))
 	}
 	if m.status != "" && m.status != "Подключено" {
-		consoleTitle += " • " + m.status
+		extras = append(extras, m.status)
 	}
-	consoleTitle = truncate(consoleTitle, termW)
-	consoleLines := []string{lipgloss.NewStyle().Bold(true).Foreground(successColor).Render(consoleTitle)}
+	detail := address
+	if len(extras) > 0 {
+		detail += " · " + strings.Join(extras, " · ")
+	}
+	dot := lipgloss.NewStyle().Foreground(successColor).Render(" ●")
+	title := lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(" " + ellipsize(name, max(4, termW/3)) + "  ")
+	consoleTitle := dot + title + lipgloss.NewStyle().Foreground(muted).Render(ellipsize(detail, max(1, termW-lipgloss.Width(dot)-lipgloss.Width(title))))
+	consoleLines := []string{consoleTitle}
 	termText := ""
 	if m.term != nil {
 		termText = m.term.RenderANSISelection(m.selection)
@@ -1905,6 +1838,7 @@ func (m *Model) upsert(profile config.Session) {
 		current := m.config.Sessions[m.formSessionIndex]
 		profile.PortForwards = append([]config.PortForward(nil), current.PortForwards...)
 		profile.ConnectionCount = current.ConnectionCount
+		profile.LastConnected = current.LastConnected
 		m.config.Sessions[m.formSessionIndex] = profile
 		m.selected = m.formSessionIndex
 		return
@@ -1915,6 +1849,7 @@ func (m *Model) upsert(profile config.Session) {
 				profile.PortForwards = append([]config.PortForward(nil), m.config.Sessions[i].PortForwards...)
 			}
 			profile.ConnectionCount = m.config.Sessions[i].ConnectionCount
+			profile.LastConnected = m.config.Sessions[i].LastConnected
 			m.config.Sessions[i] = profile
 			m.selected = i
 			return
@@ -2100,6 +2035,7 @@ func (m *Model) recordConnection(profile config.Session) error {
 			continue
 		}
 		m.config.Sessions[i].ConnectionCount++
+		m.config.Sessions[i].LastConnected = time.Now()
 		m.profile.ConnectionCount = m.config.Sessions[i].ConnectionCount
 		if m.store == nil {
 			return nil
@@ -2379,6 +2315,7 @@ func (m *Model) captureTab() *tabState {
 		transferCancel:       m.transferCancel,
 		transferRemoteTarget: m.transferRemoteTarget, forwardModal: m.forwardModal, forwards: m.forwards,
 		hostKeyPrompt: m.hostKeyPrompt, passwordPrompt: m.passwordPrompt, reconnect: m.reconnect,
+		launcher: m.launcher, pendingSave: m.pendingSave,
 	}
 }
 
@@ -2415,6 +2352,7 @@ func (m *Model) restoreTab(index int) {
 	m.hostKeyPrompt = state.hostKeyPrompt
 	m.passwordPrompt = state.passwordPrompt
 	m.reconnect = state.reconnect
+	m.launcher, m.pendingSave = state.launcher, state.pendingSave
 }
 
 func (m *Model) resetTab(id uint64) {
@@ -2442,10 +2380,12 @@ func (m *Model) resetTab(id uint64) {
 	m.hostKeyPrompt = nil
 	m.passwordPrompt = nil
 	m.reconnect = nil
+	m.launcher, m.pendingSave = nil, nil
 	m.resetForm()
 }
 
 func (m *Model) openTab() {
+	m.palette = nil
 	m.saveActiveTab()
 	m.nextTabID++
 	m.resetTab(m.nextTabID)
@@ -2457,6 +2397,7 @@ func (m *Model) switchTab(index int) {
 	if index < 0 || index >= len(m.tabs) || index == m.activeTab {
 		return
 	}
+	m.palette = nil
 	m.saveActiveTab()
 	m.restoreTab(index)
 	if m.page == pageConnected {
@@ -2480,6 +2421,7 @@ func closeTabResources(state *tabState) {
 }
 
 func (m *Model) closeActiveTab() {
+	m.palette = nil
 	m.saveActiveTab()
 	closeTabResources(m.tabs[m.activeTab])
 	if len(m.tabs) == 1 {

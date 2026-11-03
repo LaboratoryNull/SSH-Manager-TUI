@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -22,6 +23,7 @@ type Session struct {
 	CredentialProfile string        `json:"credential_profile,omitempty"`
 	Group             string        `json:"group,omitempty"`
 	ConnectionCount   uint64        `json:"connection_count,omitempty"`
+	LastConnected     time.Time     `json:"last_connected,omitzero"`
 	PortForwards      []PortForward `json:"port_forwards,omitempty"`
 }
 

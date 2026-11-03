@@ -42,10 +42,12 @@ type importWizard struct {
 	status        string
 }
 
-func scanSSHHistory() ([]config.Session, error) {
+// readShellHistory returns the commands of Bash, Zsh and Fish history in
+// chronological order, plus per-file read errors that are not fatal.
+func readShellHistory() ([]string, []string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	paths := []string{
 		os.Getenv("HISTFILE"), filepath.Join(home, ".bash_history"), filepath.Join(home, ".zsh_history"),
@@ -73,23 +75,52 @@ func scanSSHHistory() ([]config.Session, error) {
 		}
 		commands = append(commands, historyCommands(string(data))...)
 	}
+	return commands, readErrors, nil
+}
 
-	var recent []config.Session
-	seen := make(map[string]struct{})
-	for commandIndex := len(commands) - 1; commandIndex >= 0; commandIndex-- {
-		for _, session := range sshSessionsFromCommand(commands[commandIndex]) {
-			key := strings.ToLower(session.User) + "\x00" + strings.ToLower(session.Host) + "\x00" + strconv.Itoa(session.Port)
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			recent = append(recent, session)
-		}
+func scanSSHHistory() ([]config.Session, error) {
+	commands, readErrors, err := readShellHistory()
+	if err != nil {
+		return nil, err
 	}
-	if len(recent) == 0 && len(readErrors) > 0 {
+	hosts := historyHostsFromCommands(commands)
+	if len(hosts) == 0 && len(readErrors) > 0 {
 		return nil, errors.New(strings.Join(readErrors, "; "))
 	}
-	return recent, nil
+	sessions := make([]config.Session, len(hosts))
+	for index, host := range hosts {
+		sessions[index] = host.session
+	}
+	return sessions, nil
+}
+
+// historyHost is a distinct SSH destination found in shell history together
+// with how many times it was used; the newest occurrence wins for options.
+type historyHost struct {
+	session config.Session
+	uses    int
+}
+
+// historyHostsFromCommands returns destinations newest first.
+func historyHostsFromCommands(commands []string) []historyHost {
+	var hosts []historyHost
+	seen := make(map[string]int)
+	for commandIndex := len(commands) - 1; commandIndex >= 0; commandIndex-- {
+		for _, session := range sshSessionsFromCommand(commands[commandIndex]) {
+			key := sessionIdentity(session)
+			if index, exists := seen[key]; exists {
+				hosts[index].uses++
+				continue
+			}
+			seen[key] = len(hosts)
+			hosts = append(hosts, historyHost{session: session, uses: 1})
+		}
+	}
+	return hosts
+}
+
+func sessionIdentity(session config.Session) string {
+	return strings.ToLower(session.User) + "\x00" + strings.ToLower(session.Host) + "\x00" + strconv.Itoa(session.Port)
 }
 
 func readHistoryTail(filename string, limit int64) ([]byte, error) {
