@@ -2615,11 +2615,38 @@ func testKeyCommand(tabID uint64, profile config.Session) tea.Cmd {
 	}
 }
 
+// maxCoalescedOutput bounds how much already-received shell output is merged
+// into a single message, so a flood still yields to key presses regularly.
+const maxCoalescedOutput = 256 << 10
+
 func waitShellOutput(conn *remote.Connection) tea.Cmd {
 	return func() tea.Msg {
 		data, ok := <-conn.Output
+		if ok {
+			data = coalesceOutput(data, conn.Output)
+		}
 		return shellOutputMsg{data: data, ok: ok, err: conn.TerminalError(), source: conn}
 	}
+}
+
+// coalesceOutput appends chunks that are already waiting in output without
+// blocking. Every message triggers Update and a full View, so feeding a busy
+// stream (cat, journalctl, builds) chunk by chunk re-rendered the screen
+// thousands of times per second. A closed channel is left for the next wait,
+// which then reports the end of the session after this data is shown.
+func coalesceOutput(data []byte, output <-chan []byte) []byte {
+	for len(data) < maxCoalescedOutput {
+		select {
+		case more, ok := <-output:
+			if !ok {
+				return data
+			}
+			data = append(data, more...)
+		default:
+			return data
+		}
+	}
+	return data
 }
 
 func waitTransfer(updates <-chan transferProgressMsg) tea.Cmd {
