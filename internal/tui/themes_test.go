@@ -13,8 +13,8 @@ import (
 )
 
 func TestThemesAreDistinctAndUseDarkBackgrounds(t *testing.T) {
-	if len(themes) != 4 {
-		t.Fatalf("theme count = %d, want 4", len(themes))
+	if len(themes) != 5 {
+		t.Fatalf("theme count = %d, want 5", len(themes))
 	}
 	seen := make(map[string]bool)
 	for _, theme := range themes {
@@ -81,8 +81,12 @@ func TestThemeCyclesAndPersistsFromHostScreen(t *testing.T) {
 		t.Fatalf("Windows theme did not cycle: id=%q status=%q", m.config.Theme, m.status)
 	}
 	cycleThemeFromPalette(m)
-	if m.config.Theme != themeMidnight || !strings.Contains(m.status, "Midnight") {
+	if m.config.Theme != themeCorporate || !strings.Contains(m.status, "Corporate") {
 		t.Fatalf("theme cycle did not wrap: id=%q status=%q", m.config.Theme, m.status)
+	}
+	cycleThemeFromPalette(m)
+	if m.config.Theme != themeMidnight || !strings.Contains(m.status, "Midnight") {
+		t.Fatalf("theme cycle did not return to Midnight: id=%q status=%q", m.config.Theme, m.status)
 	}
 }
 
@@ -111,7 +115,7 @@ func TestWindows98ThemeUsesSegmentedProgressBar(t *testing.T) {
 	}
 }
 
-func TestUnknownStoredThemeFallsBackToMidnight(t *testing.T) {
+func TestUnknownStoredThemeFallsBackToCorporate(t *testing.T) {
 	defer applyTheme(themeMidnight)
 	store := config.NewStoreAt(t.TempDir() + "/config.json")
 	if err := store.Save(config.Config{Theme: "removed-theme"}); err != nil {
@@ -121,7 +125,7 @@ func TestUnknownStoredThemeFallsBackToMidnight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.config.Theme != themeMidnight {
+	if m.config.Theme != themeCorporate {
 		t.Fatalf("normalized theme = %q", m.config.Theme)
 	}
 }
@@ -135,8 +139,9 @@ func TestTabBarAndHostScreenStayFreeOfKeyHints(t *testing.T) {
 	m.tabs = []*tabState{m.captureTab()}
 
 	topLine := strings.TrimSpace(ansi.Strip(m.tabsView()))
-	if !strings.HasSuffix(topLine, "sshm v1.2.0") || strings.Contains(topLine, "тема:") || strings.Contains(topLine, "^T") {
-		t.Fatalf("tab bar should only show tabs and the version: %q", topLine)
+	if !strings.HasPrefix(topLine, "SSH Manager") || !strings.HasSuffix(topLine, "sshm v1.2.0") ||
+		strings.Contains(topLine, "тема:") || strings.Contains(topLine, "^T") {
+		t.Fatalf("app bar should show the product, location and version only: %q", topLine)
 	}
 	if strings.Contains(ansi.Strip(m.sessionsView()), "тема:") {
 		t.Fatal("theme hint is rendered inside the host screen")

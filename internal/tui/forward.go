@@ -501,7 +501,7 @@ func (m *Model) forwardView() string {
 
 func (m *Model) forwardListLines(width, boxHeight int) []string {
 	lines := []string{
-		titleStyle.Render("◆ Проброс портов"),
+		titleStyle.Render("Проброс портов"),
 		subtitleStyle.Render(currentPlatformKeys().ports+" • ") + lipgloss.NewStyle().Foreground(muted).Render(m.profile.Name),
 		"",
 	}
@@ -556,7 +556,7 @@ func (m *Model) forwardEditorLines(editor *forwardEditor, width int) []string {
 	if editor.editIndex >= 0 {
 		title = "Изменить туннель"
 	}
-	lines := []string{titleStyle.Render("◆ " + title), ""}
+	lines := []string{titleStyle.Render(title), ""}
 	labels := []string{"Название", "Тип", "Bind-адрес", "Bind-порт", "Целевой хост", "Целевой порт", "Автозапуск"}
 	for logical := 0; logical <= 6; logical++ {
 		labelStyle := lipgloss.NewStyle().Width(18).Foreground(muted)

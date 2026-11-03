@@ -1166,26 +1166,26 @@ func (m *Model) viewContent() string {
 		return "Запуск ssh-manager…"
 	}
 	if m.updateDialog != nil {
-		return m.tabsView() + "\n" + m.updateDialogView()
+		return m.frame(m.updateDialogView())
 	}
 	var content string
 	if m.hostKeyPrompt != nil {
-		return m.tabsView() + "\n" + m.hostKeyPromptView()
+		return m.frame(m.hostKeyPromptView())
 	}
 	if m.passwordPrompt != nil {
-		return m.tabsView() + "\n" + m.passwordPromptView()
+		return m.frame(m.passwordPromptView())
 	}
 	if m.palette != nil {
-		return m.tabsView() + "\n" + m.paletteView()
+		return m.frame(m.paletteView())
 	}
 	if m.groupInput != nil {
-		return m.tabsView() + "\n" + m.groupPromptView()
+		return m.frame(m.groupPromptView())
 	}
 	if m.profileManager != nil {
-		return m.tabsView() + "\n" + m.profileManagerView()
+		return m.frame(m.profileManagerView())
 	}
 	if m.importWizard != nil {
-		return m.tabsView() + "\n" + m.importView()
+		return m.frame(m.importView())
 	}
 	switch m.page {
 	case pageForm:
@@ -1205,45 +1205,7 @@ func (m *Model) viewContent() string {
 	default:
 		content = m.sessionsView()
 	}
-	return m.tabsView() + "\n" + content
-}
-
-func (m *Model) tabsView() string {
-	help := m.tabBarHelp()
-	if len(m.tabs) <= 1 {
-		// A single tab needs no tab strip, as in Safari or Terminal.
-		return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).
-			Render(strings.Repeat(" ", max(0, m.width-lipgloss.Width(help))) + help)
-	}
-	parts := make([]string, 0, len(m.tabs)+1)
-	used := 0
-	for index := range m.tabs {
-		label := fmt.Sprintf(" %d %s ", index+1, m.tabTitle(index))
-		style := lipgloss.NewStyle().Foreground(muted).Background(surface)
-		if index == m.activeTab {
-			style = lipgloss.NewStyle().Foreground(contrastText).Background(accent).Bold(true)
-		}
-		rendered := style.Render(label)
-		separatorWidth := 1
-		if used+separatorWidth+lipgloss.Width(rendered) > max(1, m.width-lipgloss.Width(help)-1) {
-			break
-		}
-		parts = append(parts, rendered)
-		used += separatorWidth + lipgloss.Width(rendered)
-	}
-	line := strings.Join(parts, " ")
-	remaining := m.width - lipgloss.Width(line) - lipgloss.Width(help)
-	if remaining > 0 {
-		line += strings.Repeat(" ", remaining) + help
-	}
-	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Render(line)
-}
-
-func (m *Model) tabBarHelp() string {
-	if m.appVersion == "" {
-		return ""
-	}
-	return lipgloss.NewStyle().Foreground(borderMuted).Render("sshm " + m.appVersion + " ")
+	return m.frame(content)
 }
 
 func (m *Model) themeHintVisible() bool {
@@ -1281,13 +1243,14 @@ func (m *Model) tabTitle(index int) string {
 		if formSessionName != "" {
 			return "Редактирование"
 		}
-		return "Новая сессия"
+		return "Новый сервер"
 	}
 	return "Серверы"
 }
 
+// contentHeight is the screen area between the app bar and the status bar.
 func (m *Model) contentHeight() int {
-	return max(1, m.height-1)
+	return max(1, m.height-2)
 }
 
 func (m *Model) placeCentered(content string) string {
@@ -1298,24 +1261,18 @@ func (m *Model) placeCentered(content string) string {
 	)
 }
 
-func (m *Model) connectedHints(width int) string {
+// connectedHints are shown on the status bar during a session; the bar drops
+// hints from the end when the window is narrow.
+func (m *Model) connectedHints() [][2]string {
 	keys := currentPlatformKeys()
-	compact := compactPlatformKeys()
 	if m.transferring {
-		return hintsView(width,
-			[][2]string{{keys.cancel, "Отменить передачу"}, {"F1", "Команды"}},
-			[][2]string{{compact.cancel, "Отмена"}},
-		)
+		return [][2]string{{keys.cancel, "Отменить передачу"}, {"F1", "Команды"}}
 	}
 	files := "Файлы"
 	if !m.sftpHidden {
 		files = "Скрыть файлы"
 	}
-	return hintsView(width,
-		[][2]string{{"F1", "Команды"}, {keys.toggleSFTP, files}, {"Esc q", "Отключиться"}},
-		[][2]string{{"F1", "Команды"}, {"Esc q", "Отключиться"}},
-		[][2]string{{"F1", "Команды"}},
-	)
+	return [][2]string{{"F1", "Команды"}, {"Esc q", "Отключиться"}, {keys.toggleSFTP, files}}
 }
 
 func (m *Model) groupPromptView() string {
@@ -1363,10 +1320,10 @@ func (m *Model) groupPromptView() string {
 
 func (m *Model) formView() string {
 	labels := []string{"Название", "Хост", "Порт", "Профиль", "Пользователь", "Пароль", "Приватный ключ", "Группа"}
-	title := "◆ Новая SSH-сессия"
+	title := "Новый сервер"
 	primaryAction := "Сохранить и подключить"
 	if m.formSessionName != "" {
-		title = "◆ Редактирование хоста"
+		title = "Редактирование хоста"
 		primaryAction = "Сохранить"
 	}
 	lines := []string{titleStyle.Render(title), subtitleStyle.Render("Параметры подключения"), ""}
@@ -1419,9 +1376,6 @@ func (m *Model) connectedView() string {
 	if m.term != nil && m.term.ScrollOffset() > 0 {
 		extras = append(extras, fmt.Sprintf("история −%d", m.term.ScrollOffset()))
 	}
-	if m.status != "" && m.status != "Подключено" {
-		extras = append(extras, m.status)
-	}
 	detail := address
 	if len(extras) > 0 {
 		detail += " · " + strings.Join(extras, " · ")
@@ -1434,7 +1388,7 @@ func (m *Model) connectedView() string {
 	if m.term != nil {
 		termText = m.term.RenderANSISelection(m.selection)
 	}
-	consoleLines = append(consoleLines, termText, m.connectedHints(termW))
+	consoleLines = append(consoleLines, termText)
 	consoleContent := lipgloss.NewStyle().Width(termW).Height(innerH).MaxHeight(innerH).Render(strings.Join(consoleLines, "\n"))
 	right := borderStyle.Copy().BorderForeground(consoleBorder).Width(consoleW).Height(m.contentHeight()).Render(consoleContent)
 	if m.sftpHidden {
@@ -1446,9 +1400,9 @@ func (m *Model) connectedView() string {
 }
 
 func (m *Model) filesView(width, height int) string {
-	header := lipgloss.NewStyle().Bold(true).Foreground(accentAlt).Render(" ◆ SFTP ")
-	footerLines := 3
-	listH := max(1, height-1-footerLines)
+	header := lipgloss.NewStyle().Bold(true).Foreground(textColor).Render(" Файлы ")
+	footerLines := m.fileFooterLines()
+	listH := m.fileListHeight(height)
 	m.ensureFileVisibleHeight(listH)
 	lines := []string{header}
 	end := min(len(m.visible), m.fileOffset+listH)
@@ -1471,7 +1425,12 @@ func (m *Model) filesView(width, height int) string {
 			style = style.Foreground(accentAlt)
 		}
 		if i == m.fileCursor {
-			style = selectedStyle.Copy().Width(width).Foreground(accentAlt)
+			// A solid highlight while the panel has focus, a quiet one when
+			// the keyboard belongs to the terminal.
+			style = lipgloss.NewStyle().Width(width).Background(surface).Foreground(textColor).Bold(true)
+			if m.filesFocused {
+				style = style.Background(accent).Foreground(contrastText)
+			}
 		}
 		lines = append(lines, style.Render(line))
 	}
@@ -1481,31 +1440,6 @@ func (m *Model) filesView(width, height int) string {
 	if m.transferring {
 		lines = append(lines, m.progressView(width))
 	}
-	var help string
-	keys := currentPlatformKeys()
-	compact := compactPlatformKeys()
-	if m.transferring {
-		help = hintsView(width,
-			[][2]string{{keys.cancel, "отменить передачу"}},
-			[][2]string{{compact.cancel, "отмена"}},
-		)
-	} else {
-		transferHelp := hintsView(width,
-			[][2]string{{keys.focus, "фокус"}, {keys.download, "скачать"}, {keys.upload, "загрузить"}, {"F5", "обновить"}, {"/", "корень"}},
-			[][2]string{{compact.download, "↓"}, {compact.upload, "↑"}, {"F5", "↻"}},
-			[][2]string{{"F5", "обновить"}},
-		)
-		createCopyHelp := hintsView(width,
-			[][2]string{{"n", "каталог"}, {"c", "копия"}},
-			[][2]string{{"n", "+"}, {"c", "коп"}},
-		)
-		moveDeleteHelp := hintsView(width,
-			[][2]string{{"m", "переместить"}, {"d/Del", "удалить"}},
-			[][2]string{{"m", "пер"}, {"d/Del", "×"}},
-		)
-		help = transferHelp + "\n" + createCopyHelp + "\n" + moveDeleteHelp
-	}
-	lines = append(lines, help)
 	return strings.Join(lines, "\n")
 }
 
@@ -1652,7 +1586,7 @@ func (m *Model) pickerView() string {
 		)
 	}
 	lines := []string{
-		titleStyle.Render("◆ " + title),
+		titleStyle.Render(title),
 		subtitleStyle.Render("⌂ ") + lipgloss.NewStyle().Foreground(muted).Render(truncate(picker.path, max(1, innerWidth-2))),
 		"",
 	}
@@ -2058,17 +1992,18 @@ func (m *Model) layout() (fileW, consoleW, innerH, termW, termH int) {
 		consoleW = max(1, m.width)
 		innerH = max(3, m.contentHeight()-2)
 		termW = max(1, consoleW-2)
-		termH = max(1, innerH-2)
+		termH = max(1, innerH-1)
 		return
 	}
-	fileW = max(18, m.width/5)
+	// Wide enough for a readable name plus the size column.
+	fileW = clamp(m.width/4, 26, 40)
 	if fileW > m.width-12 {
 		fileW = max(8, m.width/3)
 	}
 	consoleW = max(10, m.width-fileW)
 	innerH = max(3, m.contentHeight()-2)
 	termW = max(1, consoleW-2)
-	termH = max(1, innerH-2)
+	termH = max(1, innerH-1)
 	return
 }
 
@@ -2100,7 +2035,20 @@ func (m *Model) refreshFiles() {
 
 func (m *Model) ensureFileVisible() {
 	_, _, innerH, _, _ := m.layout()
-	m.ensureFileVisibleHeight(max(1, innerH-4))
+	m.ensureFileVisibleHeight(m.fileListHeight(innerH))
+}
+
+// fileFooterLines is the space under the file list: the transfer progress
+// while a transfer runs. Key hints live on the status bar.
+func (m *Model) fileFooterLines() int {
+	if m.transferring {
+		return 2
+	}
+	return 0
+}
+
+func (m *Model) fileListHeight(panelHeight int) int {
+	return max(1, panelHeight-1-m.fileFooterLines())
 }
 
 func (m *Model) ensureFileVisibleHeight(height int) {

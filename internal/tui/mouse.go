@@ -44,6 +44,14 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	// The app bar and the status bar are chrome: a click there activates a
+	// hint but must not move focus between the terminal and the files.
+	if mouse.Y == 0 || mouse.Y == m.height-1 {
+		if label := m.clickedHint(mouse.X, mouse.Y); label != "" {
+			return m.activateHint(label)
+		}
+		return m, nil
+	}
 
 	if m.page == pageConnected && m.reconnect == nil && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil {
 		if point, ok := m.terminalPointAt(mouse, false); ok {
@@ -74,8 +82,8 @@ func (m *Model) launcherVisible() bool {
 }
 
 // handleLauncherClick selects a server with the first click and connects on
-// a click on the already highlighted one. The list starts right below the
-// thin rule under the search field.
+// a click on the already highlighted one. The rows start right below the
+// thin rule under the column titles.
 func (m *Model) handleLauncherClick(y int) (tea.Model, tea.Cmd) {
 	if m.connecting || m.confirm {
 		return m, nil
@@ -213,7 +221,10 @@ func (m *Model) terminalPointAt(mouse tea.Mouse, clampOutside bool) (terminalPoi
 }
 
 func (m *Model) clickedTab(x int) int {
-	used := 0
+	if len(m.tabs) <= 1 {
+		return -1
+	}
+	used := m.tabStripOffset() - 1
 	helpWidth := runewidth.StringWidth(ansi.Strip(m.tabBarHelp()))
 	for index := range m.tabs {
 		label := " " + strconv.Itoa(index+1) + " " + m.tabTitle(index) + " "
@@ -221,7 +232,7 @@ func (m *Model) clickedTab(x int) int {
 		if used+1+width > max(1, m.width-helpWidth-1) {
 			break
 		}
-		if x >= used && x < used+width {
+		if x >= used+1 && x < used+1+width {
 			return index
 		}
 		used += width + 1
@@ -233,10 +244,10 @@ func (m *Model) clickedHint(x, y int) string {
 	if y < 0 || y >= m.height {
 		return ""
 	}
-	// In the normal connected view hints only occupy the tab bar and the last
-	// inner row. Restricting the scan prevents SSH output that happens to say
-	// "Enter" or "Esc" from becoming clickable.
-	if m.page == pageConnected && m.reconnect == nil && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil && y != 0 && y != m.height-2 && y != m.height-3 && y != m.height-4 {
+	// In the normal connected view hints only occupy the status bar.
+	// Restricting the scan prevents SSH output that happens to say "Enter"
+	// or "Esc" from becoming clickable.
+	if m.page == pageConnected && m.reconnect == nil && m.forwardModal == nil && m.sftpDialog == nil && m.picker == nil && m.hostKeyPrompt == nil && m.palette == nil && y != 0 && y != m.height-1 {
 		return ""
 	}
 	plain := ansi.Strip(m.viewContent())

@@ -205,7 +205,7 @@ func (m *Model) updateDialogView() string {
 		description = dialog.status
 	}
 	lines := []string{
-		lipgloss.NewStyle().Bold(true).Foreground(warningColor).Render("◆ " + heading),
+		lipgloss.NewStyle().Bold(true).Foreground(warningColor).Render(heading),
 		"",
 		lipgloss.NewStyle().Foreground(textColor).Width(innerWidth).Render(description),
 		"",

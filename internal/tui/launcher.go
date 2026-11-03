@@ -550,8 +550,8 @@ type launcherLine struct {
 }
 
 // launcherChrome is the number of box lines around the list: border,
-// padding, title, search, rule, spacer, status and hints.
-const launcherChrome = 13
+// padding, title, blank, search, blank, column header, rule and spacer.
+const launcherChrome = 11
 
 func (m *Model) sessionsView() string {
 	launcher := m.ensureLauncher()
@@ -585,13 +585,16 @@ func (m *Model) sessionsView() string {
 		more := fmt.Sprintf("ещё %d ↓", below)
 		spacer = strings.Repeat(" ", max(0, inner-lipgloss.Width(more)-1)) + lipgloss.NewStyle().Foreground(muted).Render(more)
 	}
-	status := ""
-	if m.status != "" && !m.confirm {
-		status = statusLine(ellipsize(m.status, inner-2))
+	// Table layout: column titles, a rule, then the rows.
+	lines := []string{header, "", search, ""}
+	if len(list) > 0 && len(rows) > 0 {
+		lines = append(lines, list[0], rule)
+		list = list[1:]
+	} else {
+		lines = append(lines, "", rule)
 	}
-	lines := []string{header, "", search, rule}
 	lines = append(lines, list...)
-	lines = append(lines, spacer, status, m.launcherFooter(rows, inner))
+	lines = append(lines, spacer)
 	box := borderStyle.Copy().BorderForeground(borderMuted).Padding(1, 3).Width(boxWidth).Render(strings.Join(lines, "\n"))
 	top := max(0, (m.contentHeight()-(maxList+launcherChrome))/2)
 	return m.placeAt(box, top)
@@ -621,7 +624,7 @@ func (m *Model) launcherList(rows []launchRow, width, maxHeight int) ([]string, 
 	if len(rows) == 0 {
 		launcher.lineRows = nil
 		empty := m.launcherEmptyState(width)
-		return padLines(empty, clamp(len(empty), minHeight, maxHeight)), 0
+		return padLines(empty, clamp(len(empty)+1, minHeight, maxHeight)), 0
 	}
 	nameWidth := 12
 	for _, row := range rows {
@@ -630,6 +633,9 @@ func (m *Model) launcherList(rows []launchRow, width, maxHeight int) ([]string, 
 		}
 	}
 	nameWidth = min(nameWidth, max(12, width*2/5))
+	maxHeight--
+	minHeight = min(minHeight, maxHeight)
+	columns := m.launcherColumnHeader(width, nameWidth)
 	var lines []launcherLine
 	selectedLine := 0
 	previous := "\x00"
@@ -663,6 +669,10 @@ func (m *Model) launcherList(rows []launchRow, width, maxHeight int) ([]string, 
 	}
 	launcher.offset = clamp(launcher.offset, 0, max(0, len(lines)-height))
 	end := min(len(lines), launcher.offset+height)
+	// Never end the window on a section title or spacer without its rows.
+	for end > launcher.offset+1 && lines[end-1].row < 0 && end < len(lines) {
+		end--
+	}
 	visible := make([]string, 0, height)
 	launcher.lineRows = launcher.lineRows[:0]
 	below := 0
@@ -675,7 +685,19 @@ func (m *Model) launcherList(rows []launchRow, width, maxHeight int) ([]string, 
 		visible = append(visible, line.text)
 		launcher.lineRows = append(launcher.lineRows, line.row)
 	}
-	return padLines(visible, height), below
+	return append([]string{columns}, padLines(visible, height)...), below
+}
+
+// launcherColumnHeader labels the table columns, as in a data grid.
+func (m *Model) launcherColumnHeader(width, nameWidth int) string {
+	meta := "ПОСЛЕДНИЙ ВХОД"
+	if m.launcherQuery() != "" {
+		meta = "ГРУППА"
+	}
+	label := lipgloss.NewStyle().Foreground(muted)
+	left := " " + padRight("СЕРВЕР", nameWidth) + "АДРЕС"
+	gap := max(1, width-lipgloss.Width(left)-lipgloss.Width(meta)-1)
+	return label.Render(left + strings.Repeat(" ", gap) + meta + " ")
 }
 
 // launcherRowAt maps a list line (0 = first visible line) to a row index.
@@ -761,25 +783,6 @@ func (m *Model) launcherEmptyState(width int) []string {
 		center("Введите адрес — например, deploy@example.com —", quiet),
 		center("и нажмите Enter. Сервер сохранится сам.", quiet),
 	}
-}
-
-func (m *Model) launcherFooter(rows []launchRow, width int) string {
-	if m.confirm && m.selected >= 0 && m.selected < len(m.config.Sessions) {
-		question := lipgloss.NewStyle().Foreground(errorColor).Bold(true).
-			Render(truncate("Удалить «"+m.config.Sessions[m.selected].Name+"»?", max(10, width-34)))
-		return question + "   " + renderHints([2]string{"Enter", "Удалить"}, [2]string{"Esc", "Отмена"})
-	}
-	hints := [][2]string{}
-	if len(rows) > 0 {
-		hints = append(hints, [2]string{"Enter", "Подключиться"})
-	}
-	if m.launcherQuery() != "" {
-		hints = append(hints, [2]string{"Esc", "Очистить"})
-	} else {
-		hints = append(hints, [2]string{"Ctrl+N", "Новый сервер"})
-	}
-	hints = append(hints, [2]string{"Ctrl+K", "Все команды"})
-	return hintsView(width, hints, hints[len(hints)-1:])
 }
 
 func styleSearch(input *textinput.Model, width int) {

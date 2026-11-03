@@ -20,10 +20,10 @@ import (
 	"ssh-manager-tui/internal/remote"
 )
 
-func TestLayoutUsesTwentyPercentForFiles(t *testing.T) {
+func TestLayoutGivesFilesAReadableWidth(t *testing.T) {
 	m := &Model{width: 100, height: 40}
 	files, console, _, terminal, _ := m.layout()
-	if files != 20 || console != 80 || terminal != 78 {
+	if files != 26 || console != 74 || terminal != 72 {
 		t.Fatalf("layout = files:%d console:%d terminal:%d", files, console, terminal)
 	}
 }
@@ -510,7 +510,8 @@ func TestSFTPHintIsClickable(t *testing.T) {
 	}
 	m.tabs = []*tabState{m.captureTab()}
 	x, y := -1, -1
-	for _, candidateY := range []int{m.height - 4, m.height - 3, m.height - 2} {
+	// File keys are shown on the status bar while the panel has focus.
+	for _, candidateY := range []int{m.height - 1} {
 		for candidateX := 0; candidateX < m.width; candidateX++ {
 			if m.clickedHint(candidateX, candidateY) == "F5" {
 				x, y = candidateX, candidateY
@@ -568,9 +569,9 @@ func TestSFTPDeleteHintIsClickable(t *testing.T) {
 	}
 	m.tabs = []*tabState{m.captureTab()}
 	foundX, foundY := -1, -1
-	for y := m.height - 4; y <= m.height-2 && foundX < 0; y++ {
+	for y := m.height - 1; y <= m.height-1 && foundX < 0; y++ {
 		for x := 0; x < m.width; x++ {
-			if m.clickedHint(x, y) == "d/Del" {
+			if m.clickedHint(x, y) == "Del" {
 				foundX, foundY = x, y
 				break
 			}

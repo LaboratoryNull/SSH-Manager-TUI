@@ -213,7 +213,7 @@ func (m *Model) profileManagerView() string {
 	}
 	width := min(82, max(38, m.width-6))
 	inner := max(20, width-6)
-	lines := []string{titleStyle.Render("◆ Профили пользователей"), subtitleStyle.Render("Логин, пароль или приватный ключ"), ""}
+	lines := []string{titleStyle.Render("Профили пользователей"), subtitleStyle.Render("Логин, пароль или приватный ключ"), ""}
 	if manager.editor != nil {
 		labels := []string{"Название", "Пользователь", "Пароль", "Приватный ключ"}
 		for i := range manager.editor.inputs {
