@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -195,26 +196,26 @@ func TestTerminalScrollbackSelectionUsesVisibleHistory(t *testing.T) {
 func TestTerminalAlternateScreenDoesNotPolluteScrollback(t *testing.T) {
 	s := newTerminalScreen(8, 2)
 	s.Feed([]byte("one\r\ntwo\r\nthree"))
-	historyBefore := len(s.history)
+	historyBefore := s.history.Len()
 	s.Feed([]byte("\x1b[?1049h1\r\n2\r\n3\r\n4"))
 	if s.ScrollLines(1) {
 		t.Fatal("alternate screen unexpectedly scrolled primary history")
 	}
 	s.Feed([]byte("\x1b[?1049l"))
-	if len(s.history) != historyBefore {
-		t.Fatalf("history length = %d, want %d", len(s.history), historyBefore)
+	if s.history.Len() != historyBefore {
+		t.Fatalf("history length = %d, want %d", s.history.Len(), historyBefore)
 	}
 }
 
 func TestTerminalCSI3ClearsScrollbackOnly(t *testing.T) {
 	s := newTerminalScreen(8, 2)
 	s.Feed([]byte("one\r\ntwo\r\nthree"))
-	if len(s.history) == 0 {
+	if s.history.Len() == 0 {
 		t.Fatal("test setup did not create history")
 	}
 	s.Feed([]byte("\x1b[3J"))
-	if len(s.history) != 0 || s.ScrollOffset() != 0 {
-		t.Fatalf("history after CSI 3 J: lines=%d offset=%d", len(s.history), s.ScrollOffset())
+	if s.history.Len() != 0 || s.ScrollOffset() != 0 {
+		t.Fatalf("history after CSI 3 J: lines=%d offset=%d", s.history.Len(), s.ScrollOffset())
 	}
 	if got := s.String(); got != "two\nthree" {
 		t.Fatalf("CSI 3 J cleared visible screen: %q", got)
@@ -243,5 +244,50 @@ func TestTerminalEndSessionLeavesFullScreenModesWithoutClearingPrimaryScreen(t *
 	}
 	if !strings.Contains(s.String(), "shell prompt") {
 		t.Fatalf("primary screen was discarded: %q", s.String())
+	}
+}
+
+func TestParseCSIArgs(t *testing.T) {
+	cases := []struct {
+		params string
+		sgr    bool
+		want   []int
+	}{
+		{"", false, []int{0}},
+		{"5;10", false, []int{5, 10}},
+		{";7", false, []int{0, 7}},
+		{"1:2", false, []int{0}},
+		{"38:2::10:20:30", true, []int{38, 2, 10, 20, 30}},
+		{"38;5;196", true, []int{38, 5, 196}},
+		{"x;3", false, []int{0, 3}},
+	}
+	for _, tc := range cases {
+		got := parseCSIArgs(nil, tc.params, tc.sgr)
+		if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Errorf("parseCSIArgs(%q, %v) = %v, want %v", tc.params, tc.sgr, got, tc.want)
+		}
+	}
+}
+
+func TestStyleANSI(t *testing.T) {
+	style := terminalStyle{bold: true, inverse: true, fg: indexedColor(196), bg: terminalColor{mode: 2, a: 1, b: 22, c: 255}}
+	if got, want := styleANSI(style), "\x1b[0;1;7;38;5;196;48;2;1;22;255m"; got != want {
+		t.Fatalf("styleANSI = %q, want %q", got, want)
+	}
+	if got := styleANSI(terminalStyle{}); got != "\x1b[0m" {
+		t.Fatalf("plain styleANSI = %q", got)
+	}
+}
+
+func TestCoalesceOutputMergesPendingChunks(t *testing.T) {
+	output := make(chan []byte, 4)
+	output <- []byte("b")
+	output <- []byte("c")
+	close(output)
+	if got := string(coalesceOutput([]byte("a"), output)); got != "abc" {
+		t.Fatalf("coalesced = %q, want abc", got)
+	}
+	if _, ok := <-output; ok {
+		t.Fatal("closed channel must still report closure to the next reader")
 	}
 }

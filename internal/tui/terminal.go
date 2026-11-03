@@ -88,12 +88,14 @@ type terminalScreen struct {
 	cx, cy            int
 	savedX, savedY    int
 	rows              [][]terminalCell
-	history           [][]terminalCell
+	history           rowRing
+	scratch           [][]terminalCell
 	scrollOffset      int
 	scrollTop         int
 	scrollBottom      int
 	state             int
-	csi               strings.Builder
+	csi               []byte
+	csiArgs           []int
 	osc               strings.Builder
 	utf8Buffer        []byte
 	style             terminalStyle
@@ -133,9 +135,6 @@ func (t *terminalScreen) Resize(w, h int) {
 		t.appendHistory(t.primary.rows[:len(t.primary.rows)-h])
 	}
 	t.rows, t.cx, t.cy = resizeCells(t.rows, w, h, t.cx, t.cy)
-	for i := range t.history {
-		t.history[i] = resizeCellRow(t.history[i], w)
-	}
 	if t.primary != nil {
 		t.primary.rows, t.primary.cx, t.primary.cy = resizeCells(t.primary.rows, w, h, t.primary.cx, t.primary.cy)
 		t.primary.scrollTop, t.primary.scrollBottom = 0, h-1
@@ -143,7 +142,7 @@ func (t *terminalScreen) Resize(w, h int) {
 	t.w, t.h = w, h
 	t.scrollTop, t.scrollBottom = 0, h-1
 	t.cx, t.cy = clamp(t.cx, 0, w-1), clamp(t.cy, 0, h-1)
-	t.scrollOffset = clamp(t.scrollOffset, 0, len(t.history))
+	t.scrollOffset = clamp(t.scrollOffset, 0, t.history.Len())
 }
 
 func resizeCellRow(old []terminalCell, width int) []terminalCell {
@@ -174,11 +173,55 @@ func resizeCells(old [][]terminalCell, w, h, cx, cy int) ([][]terminalCell, int,
 }
 
 func blankCellRow(w int, style terminalStyle) []terminalCell {
-	row := make([]terminalCell, w)
-	for i := range row {
-		row[i] = terminalCell{rune: ' ', style: style}
+	return fillBlank(make([]terminalCell, w), style)
+}
+
+// reuseBlankRow turns a row that left the screen into a blank row of width w,
+// reusing its backing array when it is large enough.
+func reuseBlankRow(row []terminalCell, w int, style terminalStyle) []terminalCell {
+	if cap(row) < w {
+		return blankCellRow(w, style)
+	}
+	return fillBlank(row[:w], style)
+}
+
+func fillBlank(row []terminalCell, style terminalStyle) []terminalCell {
+	if len(row) == 0 {
+		return row
+	}
+	// Doubling copies compile to memmove and are several times faster than
+	// assigning the (fairly large) cell struct one element at a time.
+	row[0] = terminalCell{rune: ' ', style: style}
+	for filled := 1; filled < len(row); filled *= 2 {
+		copy(row[filled:], row[:filled])
 	}
 	return row
+}
+
+// rowRing is the bounded scrollback. Once full, pushing a row evicts the
+// oldest one in O(1) instead of copying the whole history.
+type rowRing struct {
+	rows  [][]terminalCell
+	start int
+}
+
+func (r *rowRing) Len() int { return len(r.rows) }
+
+func (r *rowRing) At(i int) []terminalCell { return r.rows[(r.start+i)%len(r.rows)] }
+
+func (r *rowRing) Clear() { r.rows, r.start = nil, 0 }
+
+// Push stores row without copying it and returns the evicted row, if any, so
+// the caller can recycle its memory.
+func (r *rowRing) Push(row []terminalCell) []terminalCell {
+	if len(r.rows) < terminalHistoryLimit {
+		r.rows = append(r.rows, row)
+		return nil
+	}
+	evicted := r.rows[r.start]
+	r.rows[r.start] = row
+	r.start = (r.start + 1) % len(r.rows)
+	return evicted
 }
 
 func (t *terminalScreen) Feed(data []byte) {
@@ -231,7 +274,7 @@ func (t *terminalScreen) controlByte(b byte) {
 		switch b {
 		case '[':
 			t.state = 2
-			t.csi.Reset()
+			t.csi = t.csi[:0]
 		case ']':
 			t.osc.Reset()
 			t.state = 3
@@ -265,10 +308,10 @@ func (t *terminalScreen) controlByte(b byte) {
 		}
 	case 2:
 		if b >= 0x40 && b <= 0x7e {
-			t.applyCSI(b, t.csi.String())
+			t.applyCSI(b, string(t.csi))
 			t.state = 0
-		} else if t.csi.Len() < 256 {
-			t.csi.WriteByte(b)
+		} else if len(t.csi) < 256 {
+			t.csi = append(t.csi, b)
 		} else {
 			t.state = 0
 		}
@@ -418,12 +461,14 @@ func (t *terminalScreen) put(r rune) {
 	t.cx += width
 }
 
+var decSpecialGraphics = map[rune]rune{
+	'j': '┘', 'k': '┐', 'l': '┌', 'm': '└', 'n': '┼', 'q': '─',
+	't': '├', 'u': '┤', 'v': '┴', 'w': '┬', 'x': '│', '`': '◆',
+	'a': '▒', 'f': '°', 'g': '±', 'y': '≤', 'z': '≥', '{': 'π',
+}
+
 func decSpecialRune(r rune) rune {
-	if replacement, ok := map[rune]rune{
-		'j': '┘', 'k': '┐', 'l': '┌', 'm': '└', 'n': '┼', 'q': '─',
-		't': '├', 'u': '┤', 'v': '┴', 'w': '┬', 'x': '│', '`': '◆',
-		'a': '▒', 'f': '°', 'g': '±', 'y': '≤', 'z': '≥', '{': 'π',
-	}[r]; ok {
+	if replacement, ok := decSpecialGraphics[r]; ok {
 		return replacement
 	}
 	return r
@@ -450,13 +495,22 @@ func (t *terminalScreen) scrollUp(top, bottom, count int) {
 		return
 	}
 	count = min(max(1, count), bottom-top+1)
-	if !t.altActive && top == 0 && bottom == t.h-1 {
-		t.appendHistory(t.rows[:count])
-	}
+	toHistory := !t.altActive && top == 0 && bottom == t.h-1
+	gone := append(t.scratch[:0], t.rows[top:top+count]...)
 	copy(t.rows[top:bottom-count+1], t.rows[top+count:bottom+1])
-	for y := bottom - count + 1; y <= bottom; y++ {
-		t.rows[y] = blankCellRow(t.w, t.style)
+	for i, row := range gone {
+		if toHistory {
+			// The row moves into the scrollback as is; the evicted oldest row
+			// (if any) is recycled as the new blank line.
+			row = t.history.Push(row)
+		}
+		t.rows[bottom-count+1+i] = reuseBlankRow(row, t.w, t.style)
 	}
+	if toHistory && t.scrollOffset > 0 {
+		t.scrollOffset = min(t.history.Len(), t.scrollOffset+count)
+	}
+	clear(gone)
+	t.scratch = gone[:0]
 }
 
 func (t *terminalScreen) appendHistory(rows [][]terminalCell) {
@@ -464,13 +518,10 @@ func (t *terminalScreen) appendHistory(rows [][]terminalCell) {
 		return
 	}
 	for _, row := range rows {
-		t.history = append(t.history, append([]terminalCell(nil), row...))
-	}
-	if overflow := len(t.history) - terminalHistoryLimit; overflow > 0 {
-		t.history = append([][]terminalCell(nil), t.history[overflow:]...)
+		t.history.Push(append([]terminalCell(nil), row...))
 	}
 	if t.scrollOffset > 0 {
-		t.scrollOffset = min(len(t.history), t.scrollOffset+len(rows))
+		t.scrollOffset = min(t.history.Len(), t.scrollOffset+len(rows))
 	}
 }
 
@@ -479,25 +530,20 @@ func (t *terminalScreen) scrollDown(top, bottom, count int) {
 		return
 	}
 	count = min(max(1, count), bottom-top+1)
+	gone := append(t.scratch[:0], t.rows[bottom-count+1:bottom+1]...)
 	copy(t.rows[top+count:bottom+1], t.rows[top:bottom-count+1])
-	for y := top; y < top+count; y++ {
-		t.rows[y] = blankCellRow(t.w, t.style)
+	for i, row := range gone {
+		t.rows[top+i] = reuseBlankRow(row, t.w, t.style)
 	}
+	clear(gone)
+	t.scratch = gone[:0]
 }
 
 func (t *terminalScreen) applyCSI(final byte, raw string) {
 	private := strings.HasPrefix(raw, "?")
 	clean := strings.TrimLeft(raw, "?<>=!")
-	parts := strings.Split(clean, ";")
-	if final == 'm' && strings.Contains(clean, ":") {
-		parts = strings.FieldsFunc(clean, func(r rune) bool { return r == ';' || r == ':' })
-	}
-	args := make([]int, len(parts))
-	for i, part := range parts {
-		if part != "" {
-			args[i], _ = strconv.Atoi(part)
-		}
-	}
+	args := parseCSIArgs(t.csiArgs[:0], clean, final == 'm')
+	t.csiArgs = args
 	arg := func(i, fallback int) int {
 		if i >= len(args) || args[i] == 0 {
 			return fallback
@@ -604,7 +650,7 @@ func (t *terminalScreen) eraseDisplay(mode int) {
 	case 2:
 		t.clearAll()
 	case 3:
-		t.history = nil
+		t.history.Clear()
 		t.scrollOffset = 0
 	}
 }
@@ -677,6 +723,41 @@ func (t *terminalScreen) exitAltScreen() {
 	t.savedX, t.savedY = t.primary.savedX, t.primary.savedY
 	t.scrollTop, t.scrollBottom = t.primary.scrollTop, t.primary.scrollBottom
 	t.primary, t.altActive = nil, false
+}
+
+// parseCSIArgs splits CSI parameters on ';' without allocating. For SGR the
+// ':' sub-parameter separator (e.g. 38:2::R:G:B) is accepted as well, and
+// empty sub-parameters are skipped like the previous FieldsFunc split did.
+// A parameter that is not a plain number is treated as 0 (default).
+func parseCSIArgs(args []int, params string, sgr bool) []int {
+	colon := sgr && strings.IndexByte(params, ':') >= 0
+	value, valid, empty := 0, true, true
+	flush := func() {
+		if colon && empty {
+			return
+		}
+		if !valid {
+			value = 0
+		}
+		args = append(args, value)
+	}
+	for i := 0; i < len(params); i++ {
+		c := params[i]
+		switch {
+		case c == ';' || (colon && c == ':'):
+			flush()
+			value, valid, empty = 0, true, true
+		case c >= '0' && c <= '9':
+			if value < 1<<20 {
+				value = value*10 + int(c-'0')
+			}
+			empty = false
+		default:
+			valid, empty = false, false
+		}
+	}
+	flush()
+	return args
 }
 
 func (t *terminalScreen) applySGR(args []int) {
@@ -772,7 +853,7 @@ func (t *terminalScreen) reset() {
 	t.g0Graphics, t.g1Graphics, t.useG1 = false, false, false
 	t.scrollTop, t.scrollBottom = 0, t.h-1
 	t.cx, t.cy, t.savedX, t.savedY = 0, 0, 0, 0
-	t.history = nil
+	t.history.Clear()
 	t.scrollOffset = 0
 	t.clearAll()
 }
@@ -782,7 +863,7 @@ func (t *terminalScreen) ScrollLines(lines int) bool {
 		return false
 	}
 	previous := t.scrollOffset
-	t.scrollOffset = clamp(t.scrollOffset+lines, 0, len(t.history))
+	t.scrollOffset = clamp(t.scrollOffset+lines, 0, t.history.Len())
 	return previous != t.scrollOffset
 }
 
@@ -813,7 +894,7 @@ func (t *terminalScreen) endSession() {
 		t.exitAltScreen()
 	}
 	t.state = 0
-	t.csi.Reset()
+	t.csi = t.csi[:0]
 	t.osc.Reset()
 	t.utf8Buffer = nil
 	t.style = terminalStyle{}
@@ -826,17 +907,24 @@ func (t *terminalScreen) endSession() {
 }
 
 func (t *terminalScreen) visibleRows() [][]terminalCell {
-	if t.scrollOffset == 0 || len(t.history) == 0 || t.altActive {
+	if t.scrollOffset == 0 || t.history.Len() == 0 || t.altActive {
 		return t.rows
 	}
-	start := len(t.history) - t.scrollOffset
+	historyLen := t.history.Len()
+	start := historyLen - t.scrollOffset
 	visible := make([][]terminalCell, t.h)
 	for y := range visible {
 		index := start + y
-		if index < len(t.history) {
-			visible[y] = t.history[index]
+		if index < historyLen {
+			// Scrollback keeps the width it was written with; fit only the
+			// rows on screen instead of rewriting the whole history on resize.
+			row := t.history.At(index)
+			if len(row) != t.w {
+				row = resizeCellRow(row, t.w)
+			}
+			visible[y] = row
 		} else {
-			visible[y] = t.rows[index-len(t.history)]
+			visible[y] = t.rows[index-historyLen]
 		}
 	}
 	return visible
@@ -863,6 +951,7 @@ func (t *terminalScreen) RenderANSI() string {
 
 func (t *terminalScreen) RenderANSISelection(selection *terminalSelection) string {
 	var out strings.Builder
+	out.Grow(t.h * (t.w + 32))
 	active := terminalStyle{}
 	styled := false
 	rows := t.visibleRows()
@@ -881,7 +970,7 @@ func (t *terminalScreen) RenderANSISelection(selection *terminalSelection) strin
 				style.inverse = !style.inverse
 			}
 			if !styled || style != active {
-				out.WriteString(styleANSI(style))
+				writeStyleANSI(&out, style)
 				active, styled = style, true
 			}
 			out.WriteRune(cell.rune)
@@ -902,45 +991,53 @@ func (t *terminalScreen) DrainResponses() [][]byte {
 }
 
 func styleANSI(style terminalStyle) string {
-	codes := []string{"0"}
-	if style.bold {
-		codes = append(codes, "1")
-	}
-	if style.faint {
-		codes = append(codes, "2")
-	}
-	if style.italic {
-		codes = append(codes, "3")
-	}
-	if style.underline {
-		codes = append(codes, "4")
-	}
-	if style.blink {
-		codes = append(codes, "5")
-	}
-	if style.inverse {
-		codes = append(codes, "7")
-	}
-	if style.strike {
-		codes = append(codes, "9")
-	}
-	codes = appendColorCode(codes, style.fg, false)
-	codes = appendColorCode(codes, style.bg, true)
-	return "\x1b[" + strings.Join(codes, ";") + "m"
+	var out strings.Builder
+	writeStyleANSI(&out, style)
+	return out.String()
 }
 
-func appendColorCode(codes []string, color terminalColor, background bool) []string {
-	base := 38
+// writeStyleANSI emits a full SGR reset followed by the cell attributes. It
+// writes straight into the frame buffer: rendering runs on every frame, so
+// avoiding per-cell slices and strings matters.
+func writeStyleANSI(out *strings.Builder, style terminalStyle) {
+	out.WriteString("\x1b[0")
+	for _, attribute := range [...]struct {
+		on   bool
+		code string
+	}{
+		{style.bold, ";1"}, {style.faint, ";2"}, {style.italic, ";3"}, {style.underline, ";4"},
+		{style.blink, ";5"}, {style.inverse, ";7"}, {style.strike, ";9"},
+	} {
+		if attribute.on {
+			out.WriteString(attribute.code)
+		}
+	}
+	writeColorCode(out, style.fg, false)
+	writeColorCode(out, style.bg, true)
+	out.WriteByte('m')
+}
+
+func writeColorCode(out *strings.Builder, color terminalColor, background bool) {
+	base := ";38"
 	if background {
-		base = 48
+		base = ";48"
+	}
+	var digits [4]byte
+	writeNumber := func(value uint8) {
+		out.WriteByte(';')
+		out.Write(strconv.AppendUint(digits[:0], uint64(value), 10))
 	}
 	switch color.mode {
 	case 1:
-		return append(codes, strconv.Itoa(base), "5", strconv.Itoa(int(color.a)))
+		out.WriteString(base)
+		out.WriteString(";5")
+		writeNumber(color.a)
 	case 2:
-		return append(codes, strconv.Itoa(base), "2", strconv.Itoa(int(color.a)), strconv.Itoa(int(color.b)), strconv.Itoa(int(color.c)))
-	default:
-		return codes
+		out.WriteString(base)
+		out.WriteString(";2")
+		writeNumber(color.a)
+		writeNumber(color.b)
+		writeNumber(color.c)
 	}
 }
 
