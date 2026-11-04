@@ -200,7 +200,20 @@ func parseQuickTarget(query string) (config.Session, bool) {
 		}
 		return config.Session{}, false
 	}
-	if strings.ContainsAny(query, " \t") || !(strings.ContainsAny(query, "@.:") || query == "localhost") {
+	if strings.ContainsAny(query, " \t") {
+		// "root@host -p 2222" without the leading "ssh": accept it when every
+		// word is an option or the destination (not a search like "prod web").
+		words, ok := shellHistoryWords(query)
+		if !ok || !strings.Contains(query, "-") {
+			return config.Session{}, false
+		}
+		session, consumed, ok := parseSSHWords(words)
+		if !ok || consumed != len(words) {
+			return config.Session{}, false
+		}
+		return session, true
+	}
+	if !(strings.ContainsAny(query, "@.:") || query == "localhost") {
 		return config.Session{}, false
 	}
 	host, userName, port, ok := parseSSHTarget(query)

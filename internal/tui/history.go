@@ -188,62 +188,120 @@ func sshSessionsFromCommand(command string) []config.Session {
 	return sessions
 }
 
+// parseSSHWords reads the arguments of an ssh command line: options, the
+// destination and, like OpenSSH, options that follow the destination
+// ("ssh host -p 2222"). The first plain word after the destination starts
+// the remote command and ends parsing. It returns how many words were read.
 func parseSSHWords(words []string) (config.Session, int, bool) {
-	session := config.Session{Port: 22, User: currentUser()}
-	consumeNext := ""
-	for index, word := range words {
-		if word == ";" || word == "|" || word == "&&" || word == "||" {
-			return config.Session{}, index, false
+	session := config.Session{User: currentUser()}
+	explicitPort, targetPort := 0, 0
+	explicitUser, targetUser := "", ""
+	found := false
+	pending := ""
+	apply := func(option, value string) {
+		switch option {
+		case "port":
+			explicitPort = parsePortOption(value)
+		case "user":
+			explicitUser = value
+		case "key":
+			session.KeyPath = value
+		case "config":
+			applySSHConfigOption(value, &explicitPort, &explicitUser, &session.KeyPath)
 		}
-		if consumeNext != "" {
-			switch consumeNext {
-			case "port":
-				session.Port, _ = strconv.Atoi(word)
-			case "user":
-				session.User = word
-			case "key":
-				session.KeyPath = word
-			}
-			consumeNext = ""
+	}
+	index := 0
+	for ; index < len(words); index++ {
+		word := words[index]
+		if word == ";" || word == "|" || word == "&&" || word == "||" {
+			break
+		}
+		if pending != "" {
+			apply(pending, word)
+			pending = ""
 			continue
 		}
 		if strings.HasPrefix(word, "-") && word != "-" {
+			option, inline := sshOptionName(word)
 			switch {
-			case word == "-p":
-				consumeNext = "port"
-			case strings.HasPrefix(word, "-p") && len(word) > 2:
-				session.Port, _ = strconv.Atoi(word[2:])
-			case word == "-l":
-				consumeNext = "user"
-			case strings.HasPrefix(word, "-l") && len(word) > 2:
-				session.User = word[2:]
-			case word == "-i":
-				consumeNext = "key"
-			case strings.HasPrefix(word, "-i") && len(word) > 2:
-				session.KeyPath = word[2:]
-			case sshOptionTakesValue(word):
-				consumeNext = "ignore"
+			case option == "" && sshOptionTakesValue(word):
+				pending = "ignore"
+			case option != "" && inline != "":
+				apply(option, inline)
+			case option != "":
+				pending = option
 			}
 			continue
+		}
+		if found {
+			break // the remote command
 		}
 		host, userName, port, ok := parseSSHTarget(word)
 		if !ok {
 			return config.Session{}, index, false
 		}
-		session.Host = host
-		if userName != "" {
-			session.User = userName
-		}
-		if port > 0 {
-			session.Port = port
-		}
-		if session.Port < 1 || session.Port > 65535 || session.User == "" {
-			return config.Session{}, index + 1, false
-		}
-		session.Name = host
-		return session, index + 1, true
+		session.Host, targetUser, targetPort, found = host, userName, port, true
 	}
-	return config.Session{}, len(words), false
+	if !found || pending != "" {
+		return config.Session{}, index, false
+	}
+	// Explicit options win over the user@host:port shorthand.
+	session.Port = 22
+	if targetPort > 0 {
+		session.Port = targetPort
+	}
+	if explicitPort != 0 {
+		session.Port = explicitPort
+	}
+	if targetUser != "" {
+		session.User = targetUser
+	}
+	if explicitUser != "" {
+		session.User = explicitUser
+	}
+	if session.Port < 1 || session.Port > 65535 || session.User == "" {
+		return config.Session{}, index, false
+	}
+	session.Name = session.Host
+	return session, index, true
+}
+
+// sshOptionName maps -p/-l/-i/-o (with an optional inline value such as
+// "-p2222" or "-oPort=2222") to what they set.
+func sshOptionName(word string) (option, inline string) {
+	if len(word) < 2 {
+		return "", ""
+	}
+	inline = word[2:]
+	switch word[:2] {
+	case "-p":
+		return "port", inline
+	case "-l":
+		return "user", inline
+	case "-i":
+		return "key", inline
+	case "-o":
+		return "config", inline
+	}
+	return "", ""
+}
+
+// applySSHConfigOption handles "-o Port=2222", "-o 'Port 2222'", User and
+// IdentityFile; other options are ignored.
+func applySSHConfigOption(value string, port *int, userName, keyPath *string) {
+	name, setting, ok := strings.Cut(strings.TrimSpace(value), "=")
+	if !ok {
+		name, setting, _ = strings.Cut(strings.TrimSpace(value), " ")
+	}
+	setting = strings.TrimSpace(setting)
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "port":
+		*port = parsePortOption(setting)
+	case "user":
+		*userName = setting
+	case "identityfile":
+		*keyPath = setting
+	}
 }
 
 func sshOptionTakesValue(option string) bool {
@@ -344,6 +402,16 @@ func expandLocalHome(filename, home string) string {
 		return filepath.Join(home, strings.TrimPrefix(filename, "~/"))
 	}
 	return filename
+}
+
+// parsePortOption returns -1 for a value that is not a number, so an
+// explicit but broken port rejects the command instead of falling back to 22.
+func parsePortOption(value string) int {
+	number, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return -1
+	}
+	return number
 }
 
 func mustAtoi(value string) int {

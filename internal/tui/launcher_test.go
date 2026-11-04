@@ -202,3 +202,23 @@ func TestFriendlyConnectError(t *testing.T) {
 		t.Fatalf("friendly error = %q", got)
 	}
 }
+
+func TestQuickConnectUnderstandsPortOption(t *testing.T) {
+	for _, query := range []string{
+		"ssh root@19.12.12.22 -p 2222",
+		"root@19.12.12.22 -p 2222",
+		"-p 2222 root@19.12.12.22",
+		"root@19.12.12.22:2222",
+	} {
+		got, ok := parseQuickTarget(query)
+		if !ok || got.User != "root" || got.Host != "19.12.12.22" || got.Port != 2222 {
+			t.Errorf("parseQuickTarget(%q) = %s@%s:%d ok=%v", query, got.User, got.Host, got.Port, ok)
+		}
+	}
+	// Plain searches with spaces stay searches.
+	for _, query := range []string{"prod web", "root@19.12.12.22 -p", "deploy@host uptime"} {
+		if got, ok := parseQuickTarget(query); ok {
+			t.Errorf("parseQuickTarget(%q) unexpectedly = %+v", query, got)
+		}
+	}
+}

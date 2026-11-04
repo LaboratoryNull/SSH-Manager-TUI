@@ -51,3 +51,41 @@ func TestScanSSHHistoryReadsAndDeduplicatesRecentConnections(t *testing.T) {
 		t.Fatalf("recent order = %#v", sessions)
 	}
 }
+
+func TestSSHPortOptionAnywhereInTheCommand(t *testing.T) {
+	cases := []struct {
+		command string
+		user    string
+		host    string
+		port    int
+		key     string
+	}{
+		{"ssh -p 2222 root@19.12.12.22", "root", "19.12.12.22", 2222, ""},
+		{"ssh root@19.12.12.22 -p 2222", "root", "19.12.12.22", 2222, ""},
+		{"ssh root@19.12.12.22 -p2222", "root", "19.12.12.22", 2222, ""},
+		{"ssh -l admin -p 2222 19.12.12.22", "admin", "19.12.12.22", 2222, ""},
+		{"ssh 19.12.12.22 -l admin", "admin", "19.12.12.22", 22, ""},
+		{"ssh root@19.12.12.22 -o Port=2200", "root", "19.12.12.22", 2200, ""},
+		{"ssh -oPort=2200 -oUser=deploy 19.12.12.22", "deploy", "19.12.12.22", 2200, ""},
+		{`ssh -o "Port 2200" root@19.12.12.22`, "root", "19.12.12.22", 2200, ""},
+		{"ssh root@19.12.12.22 -i ~/.ssh/router -p 2222", "root", "19.12.12.22", 2222, "~/.ssh/router"},
+		{"ssh -p 2222 root@19.12.12.22:2200", "root", "19.12.12.22", 2222, ""}, // -p wins
+		// Words after the first plain word belong to the remote command.
+		{"ssh root@19.12.12.22 ls -p 7", "root", "19.12.12.22", 22, ""},
+	}
+	for _, tc := range cases {
+		sessions := sshSessionsFromCommand(tc.command)
+		if len(sessions) != 1 {
+			t.Fatalf("%q: %d sessions", tc.command, len(sessions))
+		}
+		got := sessions[0]
+		if got.User != tc.user || got.Host != tc.host || got.Port != tc.port || got.KeyPath != tc.key {
+			t.Errorf("%q: got %s@%s:%d key=%q", tc.command, got.User, got.Host, got.Port, got.KeyPath)
+		}
+	}
+	for _, broken := range []string{"ssh root@19.12.12.22 -p", "ssh root@19.12.12.22 -p abc", "ssh -p 70000 root@host"} {
+		if sessions := sshSessionsFromCommand(broken); len(sessions) != 0 {
+			t.Errorf("%q was accepted as %+v", broken, sessions)
+		}
+	}
+}
