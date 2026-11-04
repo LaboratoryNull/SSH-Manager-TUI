@@ -541,6 +541,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPressMsg:
+		msg = normalizeKeyText(msg)
 		if m.updateDialog != nil {
 			return m.handleUpdateDialogKey(msg)
 		}
@@ -2752,6 +2753,25 @@ func findParentFileNode(root, child *fileNode) *fileNode {
 		}
 	}
 	return nil
+}
+
+// normalizeKeyText drops control characters from a key's text. Terminals
+// with the kitty keyboard protocol and "report associated text" (kitty,
+// foot, ghostty, wezterm — common on Arch) send Enter with the text "\r"
+// and Tab with "\t". Key.String() then returns that text instead of
+// "enter", so no screen recognised Enter, and text inputs turned the "\r"
+// into a space.
+func normalizeKeyText(key tea.KeyPressMsg) tea.KeyPressMsg {
+	if key.Text == "" {
+		return key
+	}
+	for _, r := range key.Text {
+		if r < 0x20 || r == 0x7f {
+			key.Text = ""
+			return key
+		}
+	}
+	return key
 }
 
 func keyBytes(key tea.KeyPressMsg) []byte {
